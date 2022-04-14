@@ -45,6 +45,7 @@ class JSInliner final : public AdvancedReducer {
   Reduction ReduceJSWasmCall(Node* node);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+  FeedbackCellRef DetermineCallContext(Node* node, Node** context_out);
  private:
   Zone* zone() const { return local_zone_; }
   CommonOperatorBuilder* common() const;
@@ -63,7 +64,6 @@ class JSInliner final : public AdvancedReducer {
   SourcePositionTable* const source_positions_;
 
   base::Optional<SharedFunctionInfoRef> DetermineCallTarget(Node* node);
-  FeedbackCellRef DetermineCallContext(Node* node, Node** context_out);
 
   FrameState CreateArtificialFrameState(
       Node* node, FrameState outer_frame_state, int parameter_count,

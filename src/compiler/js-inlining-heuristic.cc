@@ -5,12 +5,19 @@
 #include "src/compiler/js-inlining-heuristic.h"
 
 #include "src/codegen/optimized-compilation-info.h"
+#include "src/compiler/bytecode-graph-builder.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
+#include "src/compiler/frame-states.h"
+#include "src/compiler/graph-reducer.h"
+#include "src/compiler/graph.h"
 #include "src/compiler/js-heap-broker.h"
+#include "src/compiler/js-native-context-specialization.h"
+#include "src/compiler/load-elimination.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/objects/objects-inl.h"
+#include "v8-container.h"
 
 namespace v8 {
 namespace internal {
@@ -171,6 +178,9 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
   // Check if we already saw that {node} before, and if so, just skip it.
   if (seen_.find(node->id()) != seen_.end()) return NoChange();
 
+  // TRACE("Reducing node:");
+  // node->Print();
+
   // Check if the {node} is an appropriate candidate for inlining.
   Candidate candidate = CollectFunctions(node, kMaxCallPolymorphism);
   if (candidate.num_functions == 0) {
@@ -180,6 +190,106 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
           << node->id() << ":" << node->op()->mnemonic()
           << ", because polymorphic inlining is disabled");
     return NoChange();
+  }
+
+  for (auto& maybeFunction : candidate.functions) {
+    if (!maybeFunction.has_value()) {
+      continue;
+    }
+
+    JSFunctionRef function = maybeFunction.value();
+    function.object()->PrintName();
+    TRACE(" : inlining candidate function name");
+
+    // function.object().
+    // JSCallAccessor call(node);
+    CallFrequency frequency =
+        (node->opcode() == IrOpcode::kJSCall)
+            ? JSCallNode{node}.Parameters().frequency()
+            : JSConstructNode{node}.Parameters().frequency();
+    Node* context;
+    FeedbackCellRef feedback_cell =
+        inliner_.DetermineCallContext(node, &context);
+    BytecodeGraphBuilderFlags flags(
+        BytecodeGraphBuilderFlag::kSkipFirstStackAndTierupCheck);
+    if (info_->analyze_environment_liveness()) {
+      flags |= BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness;
+    }
+    if (info_->bailout_on_uninitialized()) {
+      flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
+    }
+
+    // Graph::SubgraphScope scope(graph());
+
+    Zone* zone = graph()->zone();
+    Graph childGraph(zone);
+    Graph* child = &childGraph;
+    JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
+                         jsgraph_->javascript(), jsgraph_->simplified(),
+                         jsgraph_->machine());
+
+    BuildGraphFromBytecode(broker(), broker()->zone(),
+                           MakeRef(broker(), function.object()->shared()),
+                           feedback_cell, BytecodeOffset::None(), &childJsGraph,
+                           frequency, source_positions_,
+                           SourcePosition::kNotInlined, info_->code_kind(),
+                           flags, &info_->tick_counter());
+
+    TRACE(" built graph");
+    // child->Print();
+
+    // Run constant propagation
+    {
+      GraphReducer reducer(zone, child, &info_->tick_counter(), broker());
+      // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
+      JSNativeContextSpecialization nativeContextSpecialization(
+          &reducer, &childJsGraph, broker(),
+          JSNativeContextSpecialization::kNoFlags, dependencies(), zone, info_->zone());
+
+      reducer.AddReducer(&nativeContextSpecialization);
+      reducer.ReduceGraph();
+    }
+
+    // Iterate over the graph
+    std::stack<Node*> stack;
+    std::set<Node*> visited;
+    stack.push(child->end());
+
+    while (!stack.empty()) {
+      Node* node = stack.top();
+      stack.pop();
+      visited.insert(node);
+
+      if (node->opcode() == IrOpcode::kJSCall) {
+        TRACE("found a js call");
+        node->Print();
+        Node* callee = node->InputAt(0);
+        HeapObjectMatcher m(callee);
+        if (not m.HasResolvedValue()) {
+          TRACE(" but no resolved value");
+        }
+
+        if (not m.Ref(broker()).IsJSFunction()) {
+          TRACE(" but not a JS function");
+        }
+
+        if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
+          JSFunctionRef function = m.Ref(broker()).AsJSFunction();
+          function.object()->PrintName();
+          // auto params = CallParametersOf(node->op());
+          function.object()->shared().GetActiveBytecodeArray().BytecodeArraySize();
+          TRACE(" was called in inlining candidate");
+        }
+      }
+
+      // Visit inputs
+      for (int i = node->InputCount() - 1; i >= 0; i--) {
+        Node* input = node->InputAt(i);
+        if (visited.find(input) == visited.end()) {
+          stack.push(input);
+        }
+      }
+    }
   }
 
   bool can_inline_candidate = false, candidate_is_small = true;
@@ -265,17 +375,21 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
   // Forcibly inline small functions here. In the case of polymorphic inlining
   // candidate_is_small is set only when all functions are small.
   if (candidate_is_small) {
-    TRACE("Inlining small function(s) at call site #"
+    TRACE("NOT Inlining small function(s) at call site #"
           << node->id() << ":" << node->op()->mnemonic());
+    // return NoChange();
     return InlineCandidate(candidate, true);
   }
 
   // In the general case we remember the candidate for later.
+
+  // TRACE("Not inlinine for testing purposes");
   candidates_.insert(candidate);
   return NoChange();
 }
 
 void JSInliningHeuristic::Finalize() {
+  TRACE("finalize called");
   if (candidates_.empty()) return;  // Nothing to do without candidates.
   if (FLAG_trace_turbo_inlining) PrintCandidates();
 
@@ -304,7 +418,11 @@ void JSInliningHeuristic::Finalize() {
     }
 
     Reduction const reduction = InlineCandidate(candidate, false);
-    if (reduction.Changed()) return;
+    if (reduction.Changed()) {
+      candidate.functions[0].value().object()->PrintName();
+      TRACE(" was inlined");
+      return;
+    }
   }
 }
 
@@ -706,12 +824,15 @@ Reduction JSInliningHeuristic::InlineCandidate(Candidate const& candidate,
   DCHECK_NE(node->opcode(), IrOpcode::kJSWasmCall);
 #endif  // V8_ENABLE_WEBASSEMBLY
   if (num_calls == 1) {
+    TRACE("num_calls == 1");
     Reduction const reduction = inliner_.ReduceJSCall(node);
     if (reduction.Changed()) {
       total_inlined_bytecode_size_ += candidate.bytecode[0].value().length();
     }
     return reduction;
   }
+
+  TRACE("num_calls != 1");
 
   // Expand the JSCall/JSConstruct node to a subgraph first if
   // we have multiple known target functions.

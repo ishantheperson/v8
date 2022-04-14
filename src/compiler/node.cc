@@ -350,6 +350,7 @@ void PrintNode(const Node* node, std::ostream& os, int depth,
   }
   if (node) {
     os << *node;
+    os << " (" << node->InputCount() << " inputs)";
   } else {
     os << "(NULL)";
   }

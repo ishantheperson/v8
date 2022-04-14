@@ -23,6 +23,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
         inliner_(editor, local_zone, info, jsgraph, broker, source_positions),
         candidates_(local_zone),
         seen_(local_zone),
+        info_(info),
         source_positions_(source_positions),
         jsgraph_(jsgraph),
         broker_(broker),
@@ -104,6 +105,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
   JSInliner inliner_;
   Candidates candidates_;
   ZoneSet<NodeId> seen_;
+  OptimizedCompilationInfo* info_;
   SourcePositionTable* source_positions_;
   JSGraph* const jsgraph_;
   JSHeapBroker* const broker_;
