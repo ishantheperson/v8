@@ -5,6 +5,8 @@
 #ifndef V8_COMPILER_JS_INLINING_HEURISTIC_H_
 #define V8_COMPILER_JS_INLINING_HEURISTIC_H_
 
+#include <utility>
+#include <vector>
 #include "src/compiler/js-inlining.h"
 
 namespace v8 {
@@ -76,6 +78,15 @@ class JSInliningHeuristic final : public AdvancedReducer {
 
   // Candidates are kept in a sorted set of unique candidates.
   using Candidates = ZoneSet<Candidate, CandidateCompare>;
+
+  struct CallTree {
+    JSFunctionRef function;
+    std::vector<CallTree> calls;
+
+    std::string ToString(int indent = 0) const;
+  };
+
+  CallTree GetCallTree(Node* caller, JSFunctionRef function, int max_depth = 4);
 
   // Dumps candidates to console.
   void PrintCandidates();

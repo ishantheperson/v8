@@ -11,6 +11,7 @@
 #include "src/compiler/frame-states.h"
 #include "src/compiler/graph-reducer.h"
 #include "src/compiler/graph.h"
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-native-context-specialization.h"
 #include "src/compiler/load-elimination.h"
@@ -158,6 +159,107 @@ JSInliningHeuristic::Candidate JSInliningHeuristic::CollectFunctions(
   return out;
 }
 
+std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
+  std::string function_name = function.object()->shared().DebugNameCStr().get();
+  std::ostringstream os;
+  os << std::string(indent, ' ') << function_name << "\n";
+  for (const auto& child : calls) {
+    os << child.ToString(indent + 2);
+  }
+
+  return os.str();
+}
+
+auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int max_depth) -> CallTree {
+  CallTree call_tree { function, {} };
+  std::printf("\"%s\": inlining candidate function name\n", function.object()->shared().DebugNameCStr().get());
+
+  // function.object().
+  // JSCallAccessor call(node);
+  CallFrequency frequency =
+      (caller->opcode() == IrOpcode::kJSCall)
+          ? JSCallNode{caller}.Parameters().frequency()
+          : JSConstructNode{caller}.Parameters().frequency();
+  Node* context;
+  FeedbackCellRef feedback_cell =
+      inliner_.DetermineCallContext(caller, &context);
+  BytecodeGraphBuilderFlags flags(
+      BytecodeGraphBuilderFlag::kSkipFirstStackAndTierupCheck);
+  if (info_->analyze_environment_liveness()) {
+    flags |= BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness;
+  }
+  if (info_->bailout_on_uninitialized()) {
+    flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
+  }
+
+  Zone* zone = graph()->zone();
+  Graph childGraph(zone);
+  Graph* child = &childGraph;
+  JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
+                        jsgraph_->javascript(), jsgraph_->simplified(),
+                        jsgraph_->machine());
+
+  BuildGraphFromBytecode(broker(), broker()->zone(),
+                          MakeRef(broker(), function.object()->shared()),
+                          feedback_cell, BytecodeOffset::None(), &childJsGraph,
+                          frequency, source_positions_,
+                          SourcePosition::kNotInlined, info_->code_kind(),
+                          flags, &info_->tick_counter());
+
+  // Run constant propagation to resolve loads of global functions
+  // into direct function calls, so that we can grab child function calls
+  {
+    GraphReducer reducer(zone, child, &info_->tick_counter(), broker());
+    // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
+    JSNativeContextSpecialization nativeContextSpecialization(
+        &reducer, &childJsGraph, broker(),
+        JSNativeContextSpecialization::kNoFlags, dependencies(), zone, info_->zone());
+
+    reducer.AddReducer(&nativeContextSpecialization);
+    reducer.ReduceGraph();
+  }
+
+  // Iterate over the graph
+  std::stack<Node*> stack;
+  std::set<Node*> visited;
+  stack.push(child->end());
+  visited.insert(child->end());
+
+  while (!stack.empty()) {
+    Node* node = stack.top();
+    stack.pop();
+
+    if (node->opcode() == IrOpcode::kJSCall) {
+      Node* callee = node->InputAt(0);
+      HeapObjectMatcher m(callee);
+
+      if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
+        JSFunctionRef function = m.Ref(broker()).AsJSFunction();
+        // std::string function_name = function.object()->shared().DebugNameCStr().get();
+        std::printf("test:  %s was called in inlining candidate\n", function.object()->shared().DebugNameCStr().get());
+        CallTree child_tree = 
+          max_depth > 0 
+            ? GetCallTree(node, function, max_depth - 1) 
+            : CallTree{function, {}};
+        call_tree.calls.push_back(child_tree);
+        // auto params = CallParametersOf(node->op());
+        // function.object()->shared().GetActiveBytecodeArray().BytecodeArraySize();
+      }
+    }
+
+    // Visit inputs
+    for (int i = node->InputCount() - 1; i >= 0; i--) {
+      Node* input = node->InputAt(i);
+      if (visited.find(input) == visited.end()) {
+        stack.push(input);
+        visited.insert(input);
+      }
+    }
+  }  
+
+  return call_tree;
+}
+
 Reduction JSInliningHeuristic::Reduce(Node* node) {
 #if V8_ENABLE_WEBASSEMBLY
   if (mode() == kWasmOnly) {
@@ -198,98 +300,8 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
     }
 
     JSFunctionRef function = maybeFunction.value();
-    function.object()->PrintName();
-    TRACE(" : inlining candidate function name");
-
-    // function.object().
-    // JSCallAccessor call(node);
-    CallFrequency frequency =
-        (node->opcode() == IrOpcode::kJSCall)
-            ? JSCallNode{node}.Parameters().frequency()
-            : JSConstructNode{node}.Parameters().frequency();
-    Node* context;
-    FeedbackCellRef feedback_cell =
-        inliner_.DetermineCallContext(node, &context);
-    BytecodeGraphBuilderFlags flags(
-        BytecodeGraphBuilderFlag::kSkipFirstStackAndTierupCheck);
-    if (info_->analyze_environment_liveness()) {
-      flags |= BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness;
-    }
-    if (info_->bailout_on_uninitialized()) {
-      flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
-    }
-
-    // Graph::SubgraphScope scope(graph());
-
-    Zone* zone = graph()->zone();
-    Graph childGraph(zone);
-    Graph* child = &childGraph;
-    JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
-                         jsgraph_->javascript(), jsgraph_->simplified(),
-                         jsgraph_->machine());
-
-    BuildGraphFromBytecode(broker(), broker()->zone(),
-                           MakeRef(broker(), function.object()->shared()),
-                           feedback_cell, BytecodeOffset::None(), &childJsGraph,
-                           frequency, source_positions_,
-                           SourcePosition::kNotInlined, info_->code_kind(),
-                           flags, &info_->tick_counter());
-
-    TRACE(" built graph");
-    // child->Print();
-
-    // Run constant propagation
-    {
-      GraphReducer reducer(zone, child, &info_->tick_counter(), broker());
-      // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
-      JSNativeContextSpecialization nativeContextSpecialization(
-          &reducer, &childJsGraph, broker(),
-          JSNativeContextSpecialization::kNoFlags, dependencies(), zone, info_->zone());
-
-      reducer.AddReducer(&nativeContextSpecialization);
-      reducer.ReduceGraph();
-    }
-
-    // Iterate over the graph
-    std::stack<Node*> stack;
-    std::set<Node*> visited;
-    stack.push(child->end());
-
-    while (!stack.empty()) {
-      Node* node = stack.top();
-      stack.pop();
-      visited.insert(node);
-
-      if (node->opcode() == IrOpcode::kJSCall) {
-        TRACE("found a js call");
-        node->Print();
-        Node* callee = node->InputAt(0);
-        HeapObjectMatcher m(callee);
-        if (not m.HasResolvedValue()) {
-          TRACE(" but no resolved value");
-        }
-
-        if (not m.Ref(broker()).IsJSFunction()) {
-          TRACE(" but not a JS function");
-        }
-
-        if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
-          JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-          function.object()->PrintName();
-          // auto params = CallParametersOf(node->op());
-          function.object()->shared().GetActiveBytecodeArray().BytecodeArraySize();
-          TRACE(" was called in inlining candidate");
-        }
-      }
-
-      // Visit inputs
-      for (int i = node->InputCount() - 1; i >= 0; i--) {
-        Node* input = node->InputAt(i);
-        if (visited.find(input) == visited.end()) {
-          stack.push(input);
-        }
-      }
-    }
+    CallTree tree = GetCallTree(node, function);
+    std::cout << tree.ToString() << "\n";
   }
 
   bool can_inline_candidate = false, candidate_is_small = true;
@@ -419,7 +431,7 @@ void JSInliningHeuristic::Finalize() {
 
     Reduction const reduction = InlineCandidate(candidate, false);
     if (reduction.Changed()) {
-      candidate.functions[0].value().object()->PrintName();
+      if (FLAG_trace_turbo_inlining) candidate.functions[0].value().object()->PrintName();
       TRACE(" was inlined");
       return;
     }
