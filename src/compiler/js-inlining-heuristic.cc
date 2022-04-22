@@ -5,6 +5,7 @@
 #include "src/compiler/js-inlining-heuristic.h"
 
 #include <algorithm>
+#include <functional>
 #include <tuple>
 #include <utility>
 
@@ -182,12 +183,15 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
           : JSConstructNode{caller}.Parameters().frequency();
 
   // TODO: improve/fix benefit and cost
-  CallTree call_tree = {.function = function,
-                        .benefit = frequency.value(),
-                        .cost = function.code().GetInlinedBytecodeSize()};
+  CallTree call_tree = {
+      .outer = this,
+      .function = function,
+      .candidate = CollectFunctions(caller, kMaxCallPolymorphism),
+      .benefit = frequency.value(),
+      .cost = function.code().GetInlinedBytecodeSize()};
 
   std::printf(
-      "\"%s\": inlining candidate function name with benefit %f and cost %u\n",
+      "\"%s\": examining candidate function name with benefit %f and cost %u\n",
       function.object()->shared().DebugNameCStr().get(), call_tree.benefit,
       call_tree.cost);
 
@@ -321,6 +325,58 @@ void JSInliningHeuristic::CallTree::Analyze() {
             << " Cost: " << cost << " Benefit: " << benefit << "\n";
 }
 
+void JSInliningHeuristic::CallTree::Inline() {
+  // priority queue for clustering descendants
+  auto cmpCostBenefit = [](std::tuple<CallTree*, float, unsigned> left,
+                           std::tuple<CallTree*, float, unsigned> right) {
+    auto [t1, b1, c1] = left;
+    auto [t2, b2, c2] = right;
+    return (b1 / c1) < (b2 / c2);
+  };
+  std::priority_queue<
+      std::tuple<CallTree*, float, unsigned>,
+      std::vector<std::tuple<CallTree*, float, unsigned>>,
+      std::function<bool(std::tuple<CallTree*, float, unsigned>,
+                         std::tuple<CallTree*, float, unsigned>)>>
+      working(cmpCostBenefit);
+  for (auto& child : calls)
+    working.push(std::make_tuple(&child, child.benefit, child.cost));
+
+  while (!working.empty()) {
+    auto [cluster, clusterBenefit, clusterCost] = working.top();
+    working.pop();
+
+    // TODO: add canInline heuristic
+    if (cluster->inlined) cluster->InlineCluster(working);
+  }
+}
+
+void JSInliningHeuristic::CallTree::InlineCluster(
+    std::priority_queue<
+        std::tuple<CallTree*, float, unsigned>,
+        std::vector<std::tuple<CallTree*, float, unsigned>>,
+        std::function<bool(std::tuple<CallTree*, float, unsigned>,
+                           std::tuple<CallTree*, float, unsigned>)>>& working) {
+  // now we do the actual inlining? Not sure if this works properly
+  std::cout << "Inlining" << function.object()->shared().DebugNameCStr().get()
+            << " into its caller\n";
+  outer->InlineCandidate(candidate, false);
+
+  for (auto& child : calls) {
+    // if not inlined, this is a NEW cluster, add it to the queue for Inline at
+    // root to handle
+    if (!child.inlined) {
+      working.push(std::make_tuple(&child, child.benefit, child.cost));
+      continue;
+    }
+
+    // otherwise it's part of same cluster; calling InlineCluster again doesn't
+    // mean it's a new cluster, but just a way to help the actual inlining walk
+    // the call tree more easily (I think?)
+    child.InlineCluster(working);
+  }
+}
+
 Reduction JSInliningHeuristic::Reduce(Node* node) {
 #if V8_ENABLE_WEBASSEMBLY
   if (mode() == kWasmOnly) {
@@ -364,6 +420,7 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
     CallTree tree = GetCallTree(node, function);
     std::cout << tree.ToString() << "\n";
     tree.Analyze();
+    tree.Inline();
   }
 
   bool can_inline_candidate = false, candidate_is_small = true;

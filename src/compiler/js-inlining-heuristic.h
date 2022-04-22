@@ -82,7 +82,9 @@ class JSInliningHeuristic final : public AdvancedReducer {
   using Candidates = ZoneSet<Candidate, CandidateCompare>;
 
   struct CallTree {
+    JSInliningHeuristic* outer;
     JSFunctionRef function;
+    Candidate candidate;
     std::vector<CallTree> calls;
     // std::priority_queue<std::pair<int, int>> dog;
 
@@ -93,6 +95,14 @@ class JSInliningHeuristic final : public AdvancedReducer {
     std::vector<std::tuple<CallTree*, float, unsigned>> front;
 
     void Analyze();
+    void Inline();
+    void InlineCluster(
+        std::priority_queue<
+            std::tuple<CallTree*, float, unsigned>,
+            std::vector<std::tuple<CallTree*, float, unsigned>>,
+            std::function<bool(std::tuple<CallTree*, float, unsigned>,
+                               std::tuple<CallTree*, float, unsigned>)>>&
+            working);
 
     std::string ToString(int indent = 0) const;
   };
