@@ -4,6 +4,10 @@
 
 #include "src/compiler/js-inlining-heuristic.h"
 
+#include <algorithm>
+#include <tuple>
+#include <utility>
+
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/bytecode-graph-builder.h"
 #include "src/compiler/common-operator.h"
@@ -170,16 +174,28 @@ std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
   return os.str();
 }
 
-auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int max_depth) -> CallTree {
-  CallTree call_tree { function, {} };
-  std::printf("\"%s\": inlining candidate function name\n", function.object()->shared().DebugNameCStr().get());
-
-  // function.object().
-  // JSCallAccessor call(node);
+auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
+                                      int max_depth) -> CallTree {
   CallFrequency frequency =
       (caller->opcode() == IrOpcode::kJSCall)
           ? JSCallNode{caller}.Parameters().frequency()
           : JSConstructNode{caller}.Parameters().frequency();
+
+  // TODO: improve/fix benefit and cost
+  CallTree call_tree = {.function = function,
+                        .benefit = frequency.value(),
+                        .cost = function.code().GetInlinedBytecodeSize()};
+
+  std::printf(
+      "\"%s\": inlining candidate function name with benefit %f and cost %u\n",
+      function.object()->shared().DebugNameCStr().get(), call_tree.benefit,
+      call_tree.cost);
+
+  if (max_depth == 0) return call_tree;
+
+  // function.object().
+  // JSCallAccessor call(node);
+
   Node* context;
   FeedbackCellRef feedback_cell =
       inliner_.DetermineCallContext(caller, &context);
@@ -196,15 +212,15 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int 
   Graph childGraph(zone);
   Graph* child = &childGraph;
   JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
-                        jsgraph_->javascript(), jsgraph_->simplified(),
-                        jsgraph_->machine());
+                       jsgraph_->javascript(), jsgraph_->simplified(),
+                       jsgraph_->machine());
 
   BuildGraphFromBytecode(broker(), broker()->zone(),
-                          MakeRef(broker(), function.object()->shared()),
-                          feedback_cell, BytecodeOffset::None(), &childJsGraph,
-                          frequency, source_positions_,
-                          SourcePosition::kNotInlined, info_->code_kind(),
-                          flags, &info_->tick_counter());
+                         MakeRef(broker(), function.object()->shared()),
+                         feedback_cell, BytecodeOffset::None(), &childJsGraph,
+                         frequency, source_positions_,
+                         SourcePosition::kNotInlined, info_->code_kind(), flags,
+                         &info_->tick_counter());
 
   // Run constant propagation to resolve loads of global functions
   // into direct function calls, so that we can grab child function calls
@@ -213,7 +229,8 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int 
     // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
     JSNativeContextSpecialization nativeContextSpecialization(
         &reducer, &childJsGraph, broker(),
-        JSNativeContextSpecialization::kNoFlags, dependencies(), zone, info_->zone());
+        JSNativeContextSpecialization::kNoFlags, dependencies(), zone,
+        info_->zone());
 
     reducer.AddReducer(&nativeContextSpecialization);
     reducer.ReduceGraph();
@@ -235,12 +252,11 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int 
 
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-        // std::string function_name = function.object()->shared().DebugNameCStr().get();
-        std::printf("test:  %s was called in inlining candidate\n", function.object()->shared().DebugNameCStr().get());
-        CallTree child_tree = 
-          max_depth > 0 
-            ? GetCallTree(node, function, max_depth - 1) 
-            : CallTree{function, {}};
+        // std::string function_name =
+        // function.object()->shared().DebugNameCStr().get();
+        std::printf("test:  %s was called in inlining candidate\n",
+                    function.object()->shared().DebugNameCStr().get());
+        CallTree child_tree = GetCallTree(node, function, max_depth - 1);
         call_tree.calls.push_back(child_tree);
         // auto params = CallParametersOf(node->op());
         // function.object()->shared().GetActiveBytecodeArray().BytecodeArraySize();
@@ -255,9 +271,54 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function, int 
         visited.insert(input);
       }
     }
-  }  
+  }
 
   return call_tree;
+}  // namespace compiler
+
+void JSInliningHeuristic::CallTree::Analyze() {
+  // recursively analyze children
+  for (auto& child : calls) child.Analyze();
+
+  inlined = false;
+
+  // priority queue for clustering descendants
+  auto cmpCostBenefit = [](std::tuple<CallTree*, float, unsigned> left,
+                           std::tuple<CallTree*, float, unsigned> right) {
+    auto [t1, b1, c1] = left;
+    auto [t2, b2, c2] = right;
+    return (b1 / c1) < (b2 / c2);
+  };
+  front.clear();
+  for (auto& child : calls)
+    front.push_back(std::make_tuple(&child, child.benefit, child.cost));
+  std::make_heap(front.begin(), front.end(), cmpCostBenefit);
+
+  // actually cluster descendants
+  while (!front.empty()) {
+    auto [descendantTree, descendantBenefit, descendantCost] = front.front();
+
+    float newBenefit = benefit + descendantBenefit;
+    unsigned newCost = cost + descendantCost;
+    if (cmpCostBenefit(std::make_tuple(nullptr, newBenefit, newCost),
+                       std::make_tuple(nullptr, benefit, cost)))
+      break;
+
+    benefit = newBenefit;
+    cost = newCost;
+
+    std::pop_heap(front.begin(), front.end());
+    front.pop_back();
+    for (auto unusedDescendant : descendantTree->front) {
+      front.push_back(unusedDescendant);
+      std::push_heap(front.begin(), front.end());
+    }
+
+    descendantTree->inlined = true;
+  }
+
+  std::cout << function.object()->shared().DebugNameCStr().get()
+            << " Cost: " << cost << " Benefit: " << benefit << "\n";
 }
 
 Reduction JSInliningHeuristic::Reduce(Node* node) {
@@ -302,6 +363,7 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
     JSFunctionRef function = maybeFunction.value();
     CallTree tree = GetCallTree(node, function);
     std::cout << tree.ToString() << "\n";
+    tree.Analyze();
   }
 
   bool can_inline_candidate = false, candidate_is_small = true;
@@ -431,7 +493,8 @@ void JSInliningHeuristic::Finalize() {
 
     Reduction const reduction = InlineCandidate(candidate, false);
     if (reduction.Changed()) {
-      if (FLAG_trace_turbo_inlining) candidate.functions[0].value().object()->PrintName();
+      if (FLAG_trace_turbo_inlining)
+        candidate.functions[0].value().object()->PrintName();
       TRACE(" was inlined");
       return;
     }

@@ -5,8 +5,10 @@
 #ifndef V8_COMPILER_JS_INLINING_HEURISTIC_H_
 #define V8_COMPILER_JS_INLINING_HEURISTIC_H_
 
+#include <queue>
 #include <utility>
 #include <vector>
+
 #include "src/compiler/js-inlining.h"
 
 namespace v8 {
@@ -82,6 +84,15 @@ class JSInliningHeuristic final : public AdvancedReducer {
   struct CallTree {
     JSFunctionRef function;
     std::vector<CallTree> calls;
+    // std::priority_queue<std::pair<int, int>> dog;
+
+    // analysis stuff
+    bool inlined;
+    float benefit;
+    unsigned cost;
+    std::vector<std::tuple<CallTree*, float, unsigned>> front;
+
+    void Analyze();
 
     std::string ToString(int indent = 0) const;
   };
