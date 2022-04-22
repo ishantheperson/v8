@@ -190,6 +190,11 @@ bool JSInliningHeuristic::CallTree::operator<(const CallTree& other) const {
   return this->costBenefit < other.costBenefit;
 }
 
+template <typename T>
+bool operator<(std::reference_wrapper<T> lhs, std::reference_wrapper<T> rhs) {
+  return lhs.get() < rhs.get();
+}
+
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                                       int max_depth) -> CallTree {
   CallFrequency frequency =
