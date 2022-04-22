@@ -5,6 +5,7 @@
 #ifndef V8_COMPILER_JS_INLINING_HEURISTIC_H_
 #define V8_COMPILER_JS_INLINING_HEURISTIC_H_
 
+#include <functional>
 #include <queue>
 #include <utility>
 #include <vector>
@@ -81,6 +82,14 @@ class JSInliningHeuristic final : public AdvancedReducer {
   // Candidates are kept in a sorted set of unique candidates.
   using Candidates = ZoneSet<Candidate, CandidateCompare>;
 
+  struct CostBenefitPair {
+    float benefit;
+    unsigned cost;
+
+    bool operator<(const CostBenefitPair& other) const;
+    CostBenefitPair operator+(const CostBenefitPair& other) const;
+  };
+
   struct CallTree {
     JSInliningHeuristic* outer;
     JSFunctionRef function;
@@ -90,19 +99,15 @@ class JSInliningHeuristic final : public AdvancedReducer {
 
     // analysis stuff
     bool inlined;
-    float benefit;
-    unsigned cost;
-    std::vector<std::tuple<CallTree*, float, unsigned>> front;
+    CostBenefitPair costBenefit;
+    std::vector<std::reference_wrapper<CallTree>> front;
+
+    bool operator<(const CallTree& other) const;
 
     void Analyze();
     void Inline();
     void InlineCluster(
-        std::priority_queue<
-            std::tuple<CallTree*, float, unsigned>,
-            std::vector<std::tuple<CallTree*, float, unsigned>>,
-            std::function<bool(std::tuple<CallTree*, float, unsigned>,
-                               std::tuple<CallTree*, float, unsigned>)>>&
-            working);
+        std::priority_queue<std::reference_wrapper<CallTree>>& working);
 
     std::string ToString(int indent = 0) const;
   };

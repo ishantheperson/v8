@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <queue>
 #include <tuple>
 #include <utility>
 
@@ -164,6 +165,16 @@ JSInliningHeuristic::Candidate JSInliningHeuristic::CollectFunctions(
   return out;
 }
 
+bool JSInliningHeuristic::CostBenefitPair::operator<(
+    const CostBenefitPair& other) const {
+  return this->benefit / this->cost < other.benefit / other.cost;
+}
+
+auto JSInliningHeuristic::CostBenefitPair::operator+(
+    const CostBenefitPair& other) const -> CostBenefitPair {
+  return {this->benefit + other.benefit, this->cost + other.cost};
+}
+
 std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
   std::string function_name = function.object()->shared().DebugNameCStr().get();
   std::ostringstream os;
@@ -173,6 +184,10 @@ std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
   }
 
   return os.str();
+}
+
+bool JSInliningHeuristic::CallTree::operator<(const CallTree& other) const {
+  return this->costBenefit < other.costBenefit;
 }
 
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
@@ -187,13 +202,13 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
       .outer = this,
       .function = function,
       .candidate = CollectFunctions(caller, kMaxCallPolymorphism),
-      .benefit = frequency.value(),
-      .cost = function.code().GetInlinedBytecodeSize()};
+      .costBenefit = {frequency.value(),
+                      function.code().GetInlinedBytecodeSize()}};
 
   std::printf(
       "\"%s\": examining candidate function name with benefit %f and cost %u\n",
-      function.object()->shared().DebugNameCStr().get(), call_tree.benefit,
-      call_tree.cost);
+      function.object()->shared().DebugNameCStr().get(),
+      call_tree.costBenefit.benefit, call_tree.costBenefit.cost);
 
   if (max_depth == 0) return call_tree;
 
@@ -287,76 +302,49 @@ void JSInliningHeuristic::CallTree::Analyze() {
   inlined = false;
 
   // priority queue for clustering descendants
-  auto cmpCostBenefit = [](std::tuple<CallTree*, float, unsigned> left,
-                           std::tuple<CallTree*, float, unsigned> right) {
-    auto [t1, b1, c1] = left;
-    auto [t2, b2, c2] = right;
-    return (b1 / c1) < (b2 / c2);
-  };
   front.clear();
-  for (auto& child : calls)
-    front.push_back(std::make_tuple(&child, child.benefit, child.cost));
-  std::make_heap(front.begin(), front.end(), cmpCostBenefit);
+  for (auto& child : calls) front.push_back(child);
+  std::make_heap(front.begin(), front.end());
 
   // actually cluster descendants
   while (!front.empty()) {
-    auto [descendantTree, descendantBenefit, descendantCost] = front.front();
+    CallTree& descendantTree = front.front().get();
 
-    float newBenefit = benefit + descendantBenefit;
-    unsigned newCost = cost + descendantCost;
-    if (cmpCostBenefit(std::make_tuple(nullptr, newBenefit, newCost),
-                       std::make_tuple(nullptr, benefit, cost)))
-      break;
-
-    benefit = newBenefit;
-    cost = newCost;
+    CostBenefitPair newCostBenefit = costBenefit + descendantTree.costBenefit;
+    if (newCostBenefit < costBenefit) break;
+    costBenefit = newCostBenefit;
 
     std::pop_heap(front.begin(), front.end());
     front.pop_back();
-    for (auto unusedDescendant : descendantTree->front) {
+    for (auto unusedDescendant : descendantTree.front) {
       front.push_back(unusedDescendant);
       std::push_heap(front.begin(), front.end());
     }
 
-    descendantTree->inlined = true;
+    descendantTree.inlined = true;
   }
 
   std::cout << function.object()->shared().DebugNameCStr().get()
-            << " Cost: " << cost << " Benefit: " << benefit << "\n";
+            << " Cost: " << costBenefit.cost
+            << " Benefit: " << costBenefit.benefit << "\n";
 }
 
 void JSInliningHeuristic::CallTree::Inline() {
   // priority queue for clustering descendants
-  auto cmpCostBenefit = [](std::tuple<CallTree*, float, unsigned> left,
-                           std::tuple<CallTree*, float, unsigned> right) {
-    auto [t1, b1, c1] = left;
-    auto [t2, b2, c2] = right;
-    return (b1 / c1) < (b2 / c2);
-  };
-  std::priority_queue<
-      std::tuple<CallTree*, float, unsigned>,
-      std::vector<std::tuple<CallTree*, float, unsigned>>,
-      std::function<bool(std::tuple<CallTree*, float, unsigned>,
-                         std::tuple<CallTree*, float, unsigned>)>>
-      working(cmpCostBenefit);
-  for (auto& child : calls)
-    working.push(std::make_tuple(&child, child.benefit, child.cost));
+  std::priority_queue<std::reference_wrapper<CallTree>> working(calls.begin(),
+                                                                calls.end());
 
   while (!working.empty()) {
-    auto [cluster, clusterBenefit, clusterCost] = working.top();
+    CallTree& cluster = working.top().get();
     working.pop();
 
     // TODO: add canInline heuristic
-    if (cluster->inlined) cluster->InlineCluster(working);
+    if (cluster.inlined) cluster.InlineCluster(working);
   }
 }
 
 void JSInliningHeuristic::CallTree::InlineCluster(
-    std::priority_queue<
-        std::tuple<CallTree*, float, unsigned>,
-        std::vector<std::tuple<CallTree*, float, unsigned>>,
-        std::function<bool(std::tuple<CallTree*, float, unsigned>,
-                           std::tuple<CallTree*, float, unsigned>)>>& working) {
+    std::priority_queue<std::reference_wrapper<CallTree>>& working) {
   // now we do the actual inlining? Not sure if this works properly
   std::cout << "Inlining" << function.object()->shared().DebugNameCStr().get()
             << " into its caller\n";
@@ -366,7 +354,7 @@ void JSInliningHeuristic::CallTree::InlineCluster(
     // if not inlined, this is a NEW cluster, add it to the queue for Inline at
     // root to handle
     if (!child.inlined) {
-      working.push(std::make_tuple(&child, child.benefit, child.cost));
+      working.push(child);
       continue;
     }
 
