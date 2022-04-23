@@ -5,11 +5,13 @@
 #include "src/compiler/js-inlining-heuristic.h"
 
 #include <algorithm>
+#include <cassert>
 #include <functional>
 #include <queue>
 #include <tuple>
 #include <utility>
 
+#include "src/base/logging.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/bytecode-graph-builder.h"
 #include "src/compiler/common-operator.h"
@@ -36,9 +38,9 @@ namespace compiler {
   } while (false)
 
 namespace {
-bool IsSmall(int const size) {
-  return size <= FLAG_max_inlined_bytecode_size_small;
-}
+// bool IsSmall(int const size) {
+//   return size <= FLAG_max_inlined_bytecode_size_small;
+// }
 
 bool CanConsiderForInlining(JSHeapBroker* broker,
                             FeedbackCellRef const& feedback_cell) {
@@ -202,13 +204,18 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
           ? JSCallNode{caller}.Parameters().frequency()
           : JSConstructNode{caller}.Parameters().frequency();
 
+  Zone* zone = graph()->zone();
+
   // TODO: improve/fix benefit and cost
   CallTree call_tree = {
       .outer = this,
       .function = function,
       .candidate = CollectFunctions(caller, kMaxCallPolymorphism),
+      .graph = zone->New<Graph>(zone),
+      .inlined = false,
       .costBenefit = {frequency.value(),
-                      function.code().GetInlinedBytecodeSize()}};
+                      function.code().GetInlinedBytecodeSize()},
+  };
 
   std::printf(
       "\"%s\": examining candidate function name with benefit %f and cost %u\n",
@@ -232,19 +239,23 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
     flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
   }
 
-  Zone* zone = graph()->zone();
-  Graph childGraph(zone);
-  Graph* child = &childGraph;
+  Graph* child = call_tree.graph;
   JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
                        jsgraph_->javascript(), jsgraph_->simplified(),
                        jsgraph_->machine());
 
+  base::Optional<SharedFunctionInfoRef> shared_info(
+      inlining_.DetermineCallTarget(node));
+
+  int inlining_id = info_->AddInlinedFunction(
+      shared_info.object(), shared_info.GetBytecodeArray().object(),
+      source_positions_->GetSourcePosition(node));
+
   BuildGraphFromBytecode(broker(), broker()->zone(),
                          MakeRef(broker(), function.object()->shared()),
                          feedback_cell, BytecodeOffset::None(), &childJsGraph,
-                         frequency, source_positions_,
-                         SourcePosition::kNotInlined, info_->code_kind(), flags,
-                         &info_->tick_counter());
+                         frequency, source_positions_, inlining_id,
+                         info_->code_kind(), flags, &info_->tick_counter());
 
   // Run constant propagation to resolve loads of global functions
   // into direct function calls, so that we can grab child function calls
@@ -334,27 +345,26 @@ void JSInliningHeuristic::CallTree::Analyze() {
             << " Benefit: " << costBenefit.benefit << "\n";
 }
 
-void JSInliningHeuristic::CallTree::Inline() {
+Reduction JSInliningHeuristic::CallTree::Inline(
+    JSInliningHeuristic* heuristic) {
   // priority queue for clustering descendants
   std::priority_queue<std::reference_wrapper<CallTree>> working(calls.begin(),
                                                                 calls.end());
 
-  while (!working.empty()) {
-    CallTree& cluster = working.top().get();
-    working.pop();
+  // while (!working.empty()) {
+  //   CallTree& cluster = working.top().get();
+  //   working.pop();
 
-    // TODO: add canInline heuristic
-    if (cluster.inlined) cluster.InlineCluster(working);
-  }
+  //   // TODO: add canInline heuristic
+  //   if (!cluster.inlined) cluster.InlineCluster(working, heuristic);
+  // }
+  assert(!inlined);
+  return InlineCluster(working, heuristic);
 }
 
-void JSInliningHeuristic::CallTree::InlineCluster(
-    std::priority_queue<std::reference_wrapper<CallTree>>& working) {
-  // now we do the actual inlining? Not sure if this works properly
-  std::cout << "Inlining" << function.object()->shared().DebugNameCStr().get()
-            << " into its caller\n";
-  outer->InlineCandidate(candidate, false);
-
+Reduction JSInliningHeuristic::CallTree::InlineCluster(
+    std::priority_queue<std::reference_wrapper<CallTree>>& working,
+    JSInliningHeuristic* heuristic) {
   for (auto& child : calls) {
     // if not inlined, this is a NEW cluster, add it to the queue for Inline at
     // root to handle
@@ -366,11 +376,29 @@ void JSInliningHeuristic::CallTree::InlineCluster(
     // otherwise it's part of same cluster; calling InlineCluster again doesn't
     // mean it's a new cluster, but just a way to help the actual inlining walk
     // the call tree more easily (I think?)
-    child.InlineCluster(working);
+    Zone* zone = heuristic->graph()->zone();
+    GraphReducer reducer(zone, graph, &heuristic->info_->tick_counter(),
+                         heuristic->broker());
+
+    JSGraph childJsGraph(
+        heuristic->isolate(), graph, heuristic->jsgraph_->common(),
+        heuristic->jsgraph_->javascript(), heuristic->jsgraph_->simplified(),
+        heuristic->jsgraph_->machine());
+
+    JSInliningHeuristic childHeuristic(
+        &reducer, zone, heuristic->info_, &childJsGraph, heuristic->broker(),
+        heuristic->source_positions_, heuristic->mode());
+    child.InlineCluster(working, &childHeuristic);
   }
+
+  // now we do the actual inlining? Not sure if this works properly
+  std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
+            << " into its caller\n";
+  return heuristic->InlineCandidate(candidate, graph);
 }
 
 Reduction JSInliningHeuristic::Reduce(Node* node) {
+  (void)max_inlined_bytecode_size_cumulative_;
 #if V8_ENABLE_WEBASSEMBLY
   if (mode() == kWasmOnly) {
     if (node->opcode() == IrOpcode::kJSWasmCall) {
@@ -411,144 +439,157 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
 
     JSFunctionRef function = maybeFunction.value();
     CallTree tree = GetCallTree(node, function);
-    std::cout << tree.ToString() << "\n";
+    std::cout << "Subtree:\n" << tree.ToString() << "\n";
     tree.Analyze();
-    tree.Inline();
+    Reduction reduction = tree.Inline(this);
+    std::cout << "\n\n\n";
+    return reduction;
   }
 
-  bool can_inline_candidate = false, candidate_is_small = true;
-  candidate.total_size = 0;
-  FrameState frame_state{NodeProperties::GetFrameStateInput(node)};
-  FrameStateInfo const& frame_info = frame_state.frame_state_info();
-  Handle<SharedFunctionInfo> frame_shared_info;
-  for (int i = 0; i < candidate.num_functions; ++i) {
-    if (!candidate.bytecode[i].has_value()) {
-      candidate.can_inline_function[i] = false;
-      continue;
-    }
-
-    SharedFunctionInfoRef shared = candidate.functions[i].has_value()
-                                       ? candidate.functions[i].value().shared()
-                                       : candidate.shared_info.value();
-    candidate.can_inline_function[i] = candidate.bytecode[i].has_value();
-    // Because of concurrent optimization, optimization of the inlining
-    // candidate could have been disabled meanwhile.
-    // JSInliner will check this again and not actually inline the function in
-    // this case.
-    CHECK_IMPLIES(candidate.can_inline_function[i],
-                  shared.IsInlineable() ||
-                      shared.GetInlineability() ==
-                          SharedFunctionInfo::kHasOptimizationDisabled);
-    // Do not allow direct recursion i.e. f() -> f(). We still allow indirect
-    // recursion like f() -> g() -> f(). The indirect recursion is helpful in
-    // cases where f() is a small dispatch function that calls the appropriate
-    // function. In the case of direct recursion, we only have some static
-    // information for the first level of inlining and it may not be that useful
-    // to just inline one level in recursive calls. In some cases like tail
-    // recursion we may benefit from recursive inlining, if we have additional
-    // analysis that converts them to iterative implementations. Though it is
-    // not obvious if such an analysis is needed.
-    if (frame_info.shared_info().ToHandle(&frame_shared_info) &&
-        frame_shared_info.equals(shared.object())) {
-      TRACE("Not considering call site #" << node->id() << ":"
-                                          << node->op()->mnemonic()
-                                          << ", because of recursive inlining");
-      candidate.can_inline_function[i] = false;
-    }
-    if (candidate.can_inline_function[i]) {
-      can_inline_candidate = true;
-      BytecodeArrayRef bytecode = candidate.bytecode[i].value();
-      candidate.total_size += bytecode.length();
-      unsigned inlined_bytecode_size = 0;
-      if (candidate.functions[i].has_value()) {
-        JSFunctionRef function = candidate.functions[i].value();
-        inlined_bytecode_size = function.code().GetInlinedBytecodeSize();
-        candidate.total_size += inlined_bytecode_size;
-      }
-      candidate_is_small = candidate_is_small &&
-                           IsSmall(bytecode.length() + inlined_bytecode_size);
-    }
-  }
-  if (!can_inline_candidate) return NoChange();
-
-  // Gather feedback on how often this call site has been hit before.
-  if (node->opcode() == IrOpcode::kJSCall) {
-    CallParameters const p = CallParametersOf(node->op());
-    candidate.frequency = p.frequency();
-  } else {
-    ConstructParameters const p = ConstructParametersOf(node->op());
-    candidate.frequency = p.frequency();
-  }
-
-  // Don't consider a {candidate} whose frequency is below the
-  // threshold, i.e. a call site that is only hit once every N
-  // invocations of the caller.
-  if (candidate.frequency.IsKnown() &&
-      candidate.frequency.value() < FLAG_min_inlining_frequency) {
-    return NoChange();
-  }
-
-  // Found a candidate. Insert it into the set of seen nodes s.t. we don't
-  // revisit in the future. Note this insertion happens here and not earlier in
-  // order to make inlining decisions order-independent. A node may not be a
-  // candidate when first seen, but later reductions may turn it into a valid
-  // candidate. In that case, the node should be revisited by
-  // JSInliningHeuristic.
-  seen_.insert(node->id());
-
-  // Forcibly inline small functions here. In the case of polymorphic inlining
-  // candidate_is_small is set only when all functions are small.
-  if (candidate_is_small) {
-    TRACE("NOT Inlining small function(s) at call site #"
-          << node->id() << ":" << node->op()->mnemonic());
-    // return NoChange();
-    return InlineCandidate(candidate, true);
-  }
-
-  // In the general case we remember the candidate for later.
-
-  // TRACE("Not inlinine for testing purposes");
-  candidates_.insert(candidate);
   return NoChange();
+
+  // bool can_inline_candidate = false, candidate_is_small = true;
+  // candidate.total_size = 0;
+  // FrameState frame_state{NodeProperties::GetFrameStateInput(node)};
+  // FrameStateInfo const& frame_info = frame_state.frame_state_info();
+  // Handle<SharedFunctionInfo> frame_shared_info;
+  // for (int i = 0; i < candidate.num_functions; ++i) {
+  //   if (!candidate.bytecode[i].has_value()) {
+  //     candidate.can_inline_function[i] = false;
+  //     continue;
+  //   }
+
+  //   SharedFunctionInfoRef shared = candidate.functions[i].has_value()
+  //                                      ?
+  //                                      candidate.functions[i].value().shared()
+  //                                      : candidate.shared_info.value();
+  //   candidate.can_inline_function[i] = candidate.bytecode[i].has_value();
+  //   // Because of concurrent optimization, optimization of the inlining
+  //   // candidate could have been disabled meanwhile.
+  //   // JSInliner will check this again and not actually inline the function
+  //   in
+  //   // this case.
+  //   CHECK_IMPLIES(candidate.can_inline_function[i],
+  //                 shared.IsInlineable() ||
+  //                     shared.GetInlineability() ==
+  //                         SharedFunctionInfo::kHasOptimizationDisabled);
+  //   // Do not allow direct recursion i.e. f() -> f(). We still allow indirect
+  //   // recursion like f() -> g() -> f(). The indirect recursion is helpful in
+  //   // cases where f() is a small dispatch function that calls the
+  //   appropriate
+  //   // function. In the case of direct recursion, we only have some static
+  //   // information for the first level of inlining and it may not be that
+  //   useful
+  //   // to just inline one level in recursive calls. In some cases like tail
+  //   // recursion we may benefit from recursive inlining, if we have
+  //   additional
+  //   // analysis that converts them to iterative implementations. Though it is
+  //   // not obvious if such an analysis is needed.
+  //   if (frame_info.shared_info().ToHandle(&frame_shared_info) &&
+  //       frame_shared_info.equals(shared.object())) {
+  //     TRACE("Not considering call site #" << node->id() << ":"
+  //                                         << node->op()->mnemonic()
+  //                                         << ", because of recursive
+  //                                         inlining");
+  //     candidate.can_inline_function[i] = false;
+  //   }
+  //   if (candidate.can_inline_function[i]) {
+  //     can_inline_candidate = true;
+  //     BytecodeArrayRef bytecode = candidate.bytecode[i].value();
+  //     candidate.total_size += bytecode.length();
+  //     unsigned inlined_bytecode_size = 0;
+  //     if (candidate.functions[i].has_value()) {
+  //       JSFunctionRef function = candidate.functions[i].value();
+  //       inlined_bytecode_size = function.code().GetInlinedBytecodeSize();
+  //       candidate.total_size += inlined_bytecode_size;
+  //     }
+  //     candidate_is_small = candidate_is_small &&
+  //                          IsSmall(bytecode.length() +
+  //                          inlined_bytecode_size);
+  //   }
+  // }
+  // if (!can_inline_candidate) return NoChange();
+
+  // // Gather feedback on how often this call site has been hit before.
+  // if (node->opcode() == IrOpcode::kJSCall) {
+  //   CallParameters const p = CallParametersOf(node->op());
+  //   candidate.frequency = p.frequency();
+  // } else {
+  //   ConstructParameters const p = ConstructParametersOf(node->op());
+  //   candidate.frequency = p.frequency();
+  // }
+
+  // // Don't consider a {candidate} whose frequency is below the
+  // // threshold, i.e. a call site that is only hit once every N
+  // // invocations of the caller.
+  // if (candidate.frequency.IsKnown() &&
+  //     candidate.frequency.value() < FLAG_min_inlining_frequency) {
+  //   return NoChange();
+  // }
+
+  // // Found a candidate. Insert it into the set of seen nodes s.t. we don't
+  // // revisit in the future. Note this insertion happens here and not earlier
+  // in
+  // // order to make inlining decisions order-independent. A node may not be a
+  // // candidate when first seen, but later reductions may turn it into a valid
+  // // candidate. In that case, the node should be revisited by
+  // // JSInliningHeuristic.
+  // seen_.insert(node->id());
+
+  // // Forcibly inline small functions here. In the case of polymorphic
+  // inlining
+  // // candidate_is_small is set only when all functions are small.
+  // if (candidate_is_small) {
+  //   TRACE("NOT Inlining small function(s) at call site #"
+  //         << node->id() << ":" << node->op()->mnemonic());
+  //   // return NoChange();
+  //   return InlineCandidate(candidate, true);
+  // }
+
+  // // In the general case we remember the candidate for later.
+
+  // // TRACE("Not inlinine for testing purposes");
+  // candidates_.insert(candidate);
+  // return NoChange();
 }
 
 void JSInliningHeuristic::Finalize() {
-  TRACE("finalize called");
-  if (candidates_.empty()) return;  // Nothing to do without candidates.
-  if (FLAG_trace_turbo_inlining) PrintCandidates();
+  // TRACE("finalize called");
+  // if (candidates_.empty()) return;  // Nothing to do without candidates.
+  // if (FLAG_trace_turbo_inlining) PrintCandidates();
 
-  // We inline at most one candidate in every iteration of the fixpoint.
-  // This is to ensure that we don't consume the full inlining budget
-  // on things that aren't called very often.
-  // TODO(bmeurer): Use std::priority_queue instead of std::set here.
-  while (!candidates_.empty()) {
-    auto i = candidates_.begin();
-    Candidate candidate = *i;
-    candidates_.erase(i);
+  // // We inline at most one candidate in every iteration of the fixpoint.
+  // // This is to ensure that we don't consume the full inlining budget
+  // // on things that aren't called very often.
+  // // TODO(bmeurer): Use std::priority_queue instead of std::set here.
+  // while (!candidates_.empty()) {
+  //   auto i = candidates_.begin();
+  //   Candidate candidate = *i;
+  //   candidates_.erase(i);
 
-    // Ignore this candidate if it's no longer valid.
-    if (!IrOpcode::IsInlineeOpcode(candidate.node->opcode())) continue;
-    if (candidate.node->IsDead()) continue;
+  //   // Ignore this candidate if it's no longer valid.
+  //   if (!IrOpcode::IsInlineeOpcode(candidate.node->opcode())) continue;
+  //   if (candidate.node->IsDead()) continue;
 
-    // Make sure we have some extra budget left, so that any small functions
-    // exposed by this function would be given a chance to inline.
-    double size_of_candidate =
-        candidate.total_size * FLAG_reserve_inline_budget_scale_factor;
-    int total_size =
-        total_inlined_bytecode_size_ + static_cast<int>(size_of_candidate);
-    if (total_size > max_inlined_bytecode_size_cumulative_) {
-      // Try if any smaller functions are available to inline.
-      continue;
-    }
+  //   // Make sure we have some extra budget left, so that any small functions
+  //   // exposed by this function would be given a chance to inline.
+  //   double size_of_candidate =
+  //       candidate.total_size * FLAG_reserve_inline_budget_scale_factor;
+  //   int total_size =
+  //       total_inlined_bytecode_size_ + static_cast<int>(size_of_candidate);
+  //   if (total_size > max_inlined_bytecode_size_cumulative_) {
+  //     // Try if any smaller functions are available to inline.
+  //     continue;
+  //   }
 
-    Reduction const reduction = InlineCandidate(candidate, false);
-    if (reduction.Changed()) {
-      if (FLAG_trace_turbo_inlining)
-        candidate.functions[0].value().object()->PrintName();
-      TRACE(" was inlined");
-      return;
-    }
-  }
+  //   Reduction const reduction = InlineCandidate(candidate, false);
+  //   if (reduction.Changed()) {
+  //     if (FLAG_trace_turbo_inlining)
+  //       candidate.functions[0].value().object()->PrintName();
+  //     TRACE(" was inlined");
+  //     return;
+  //   }
+  // }
 }
 
 namespace {
@@ -942,7 +983,7 @@ void JSInliningHeuristic::CreateOrReuseDispatch(Node* node, Node* callee,
 }
 
 Reduction JSInliningHeuristic::InlineCandidate(Candidate const& candidate,
-                                               bool small_function) {
+                                               Graph* callee) {
   int const num_calls = candidate.num_functions;
   Node* const node = candidate.node;
 #if V8_ENABLE_WEBASSEMBLY
@@ -950,86 +991,91 @@ Reduction JSInliningHeuristic::InlineCandidate(Candidate const& candidate,
 #endif  // V8_ENABLE_WEBASSEMBLY
   if (num_calls == 1) {
     TRACE("num_calls == 1");
-    Reduction const reduction = inliner_.ReduceJSCall(node);
+    Reduction const reduction = inliner_.ReduceJSCall(node, callee);
     if (reduction.Changed()) {
       total_inlined_bytecode_size_ += candidate.bytecode[0].value().length();
     }
     return reduction;
   }
 
-  TRACE("num_calls != 1");
+  UNREACHABLE();
 
-  // Expand the JSCall/JSConstruct node to a subgraph first if
-  // we have multiple known target functions.
-  DCHECK_LT(1, num_calls);
-  Node* calls[kMaxCallPolymorphism + 1];
-  Node* if_successes[kMaxCallPolymorphism];
-  Node* callee = NodeProperties::GetValueInput(node, 0);
+  // TRACE("num_calls != 1");
 
-  // Setup the inputs for the cloned call nodes.
-  int const input_count = node->InputCount();
-  Node** inputs = graph()->zone()->NewArray<Node*>(input_count);
-  for (int i = 0; i < input_count; ++i) {
-    inputs[i] = node->InputAt(i);
-  }
+  // // Expand the JSCall/JSConstruct node to a subgraph first if
+  // // we have multiple known target functions.
+  // DCHECK_LT(1, num_calls);
+  // Node* calls[kMaxCallPolymorphism + 1];
+  // Node* if_successes[kMaxCallPolymorphism];
+  // Node* callee = NodeProperties::GetValueInput(node, 0);
 
-  // Create the appropriate control flow to dispatch to the cloned calls.
-  CreateOrReuseDispatch(node, callee, candidate, if_successes, calls, inputs,
-                        input_count);
+  // // Setup the inputs for the cloned call nodes.
+  // int const input_count = node->InputCount();
+  // Node** inputs = graph()->zone()->NewArray<Node*>(input_count);
+  // for (int i = 0; i < input_count; ++i) {
+  //   inputs[i] = node->InputAt(i);
+  // }
 
-  // Check if we have an exception projection for the call {node}.
-  Node* if_exception = nullptr;
-  if (NodeProperties::IsExceptionalCall(node, &if_exception)) {
-    Node* if_exceptions[kMaxCallPolymorphism + 1];
-    for (int i = 0; i < num_calls; ++i) {
-      if_successes[i] = graph()->NewNode(common()->IfSuccess(), calls[i]);
-      if_exceptions[i] =
-          graph()->NewNode(common()->IfException(), calls[i], calls[i]);
-    }
+  // // Create the appropriate control flow to dispatch to the cloned calls.
+  // CreateOrReuseDispatch(node, callee, candidate, if_successes, calls, inputs,
+  //                       input_count);
 
-    // Morph the {if_exception} projection into a join.
-    Node* exception_control =
-        graph()->NewNode(common()->Merge(num_calls), num_calls, if_exceptions);
-    if_exceptions[num_calls] = exception_control;
-    Node* exception_effect = graph()->NewNode(common()->EffectPhi(num_calls),
-                                              num_calls + 1, if_exceptions);
-    Node* exception_value = graph()->NewNode(
-        common()->Phi(MachineRepresentation::kTagged, num_calls), num_calls + 1,
-        if_exceptions);
-    ReplaceWithValue(if_exception, exception_value, exception_effect,
-                     exception_control);
-  }
+  // // Check if we have an exception projection for the call {node}.
+  // Node* if_exception = nullptr;
+  // if (NodeProperties::IsExceptionalCall(node, &if_exception)) {
+  //   Node* if_exceptions[kMaxCallPolymorphism + 1];
+  //   for (int i = 0; i < num_calls; ++i) {
+  //     if_successes[i] = graph()->NewNode(common()->IfSuccess(), calls[i]);
+  //     if_exceptions[i] =
+  //         graph()->NewNode(common()->IfException(), calls[i], calls[i]);
+  //   }
 
-  // Morph the original call site into a join of the dispatched call sites.
-  Node* control =
-      graph()->NewNode(common()->Merge(num_calls), num_calls, if_successes);
-  calls[num_calls] = control;
-  Node* effect =
-      graph()->NewNode(common()->EffectPhi(num_calls), num_calls + 1, calls);
-  Node* value =
-      graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, num_calls),
-                       num_calls + 1, calls);
-  ReplaceWithValue(node, value, effect, control);
+  //   // Morph the {if_exception} projection into a join.
+  //   Node* exception_control =
+  //       graph()->NewNode(common()->Merge(num_calls), num_calls,
+  //       if_exceptions);
+  //   if_exceptions[num_calls] = exception_control;
+  //   Node* exception_effect = graph()->NewNode(common()->EffectPhi(num_calls),
+  //                                             num_calls + 1, if_exceptions);
+  //   Node* exception_value = graph()->NewNode(
+  //       common()->Phi(MachineRepresentation::kTagged, num_calls), num_calls +
+  //       1, if_exceptions);
+  //   ReplaceWithValue(if_exception, exception_value, exception_effect,
+  //                    exception_control);
+  // }
 
-  // Inline the individual, cloned call sites.
-  for (int i = 0; i < num_calls && total_inlined_bytecode_size_ <
-                                       max_inlined_bytecode_size_absolute_;
-       ++i) {
-    if (candidate.can_inline_function[i] &&
-        (small_function || total_inlined_bytecode_size_ <
-                               max_inlined_bytecode_size_cumulative_)) {
-      Node* call = calls[i];
-      Reduction const reduction = inliner_.ReduceJSCall(call);
-      if (reduction.Changed()) {
-        total_inlined_bytecode_size_ += candidate.bytecode[i]->length();
-        // Killing the call node is not strictly necessary, but it is safer to
-        // make sure we do not resurrect the node.
-        call->Kill();
-      }
-    }
-  }
+  // // Morph the original call site into a join of the dispatched call sites.
+  // Node* control =
+  //     graph()->NewNode(common()->Merge(num_calls), num_calls, if_successes);
+  // calls[num_calls] = control;
+  // Node* effect =
+  //     graph()->NewNode(common()->EffectPhi(num_calls), num_calls + 1, calls);
+  // Node* value =
+  //     graph()->NewNode(common()->Phi(MachineRepresentation::kTagged,
+  //     num_calls),
+  //                      num_calls + 1, calls);
+  // ReplaceWithValue(node, value, effect, control);
 
-  return Replace(value);
+  // // Inline the individual, cloned call sites.
+  // for (int i = 0; i < num_calls && total_inlined_bytecode_size_ <
+  //                                      max_inlined_bytecode_size_absolute_;
+  //      ++i) {
+  //   if (candidate.can_inline_function[i] &&
+  //       (small_function || total_inlined_bytecode_size_ <
+  //                              max_inlined_bytecode_size_cumulative_)) {
+  //     Node* call = calls[i];
+  //     Reduction const reduction = inliner_.ReduceJSCall(call);
+  //     if (reduction.Changed()) {
+  //       total_inlined_bytecode_size_ += candidate.bytecode[i]->length();
+  //       // Killing the call node is not strictly necessary, but it is safer
+  //       to
+  //       // make sure we do not resurrect the node.
+  //       call->Kill();
+  //     }
+  //   }
+  // }
+
+  // return Replace(value);
 }
 
 bool JSInliningHeuristic::CandidateCompare::operator()(

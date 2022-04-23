@@ -58,9 +58,7 @@ class JSCallAccessor {
     return call_->InputAt(JSCallOrConstructNode::TargetIndex());
   }
 
-  Node* receiver() const {
-    return JSCallNode{call_}.receiver();
-  }
+  Node* receiver() const { return JSCallNode{call_}.receiver(); }
 
   Node* new_target() const { return JSConstructNode{call_}.new_target(); }
 
@@ -462,7 +460,7 @@ Reduction JSInliner::ReduceJSWasmCall(Node* node) {
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-Reduction JSInliner::ReduceJSCall(Node* node) {
+Reduction JSInliner::ReduceJSCall(Node* node, Graph* callee) {
   DCHECK(IrOpcode::IsInlineeOpcode(node->opcode()));
 #if V8_ENABLE_WEBASSEMBLY
   DCHECK_NE(node->opcode(), IrOpcode::kJSWasmCall);
@@ -549,7 +547,8 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
 
   // Determine the target's feedback vector and its context.
   Node* context;
-  FeedbackCellRef feedback_cell = DetermineCallContext(node, &context);
+  // FeedbackCellRef feedback_cell =
+  DetermineCallContext(node, &context);
 
   TRACE("Inlining " << *shared_info << " into " << outer_shared_info
                     << ((exception_target != nullptr) ? " (inside try-block)"
@@ -558,39 +557,41 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
   // After this point, we've made a decision to inline this function.
   // We shall not bailout from inlining if we got here.
 
-  BytecodeArrayRef bytecode_array = shared_info->GetBytecodeArray();
+  // BytecodeArrayRef bytecode_array = shared_info->GetBytecodeArray();
 
   // Remember that we inlined this function.
-  int inlining_id =
-      info_->AddInlinedFunction(shared_info->object(), bytecode_array.object(),
-                                source_positions_->GetSourcePosition(node));
+  // int inlining_id =
+  //     info_->AddInlinedFunction(shared_info->object(),
+  //     bytecode_array.object(),
+  //                               source_positions_->GetSourcePosition(node));
 
   // Create the subgraph for the inlinee.
-  Node* start_node;
-  Node* end;
-  {
-    // Run the BytecodeGraphBuilder to create the subgraph.
-    Graph::SubgraphScope scope(graph());
-    BytecodeGraphBuilderFlags flags(
-        BytecodeGraphBuilderFlag::kSkipFirstStackAndTierupCheck);
-    if (info_->analyze_environment_liveness()) {
-      flags |= BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness;
-    }
-    if (info_->bailout_on_uninitialized()) {
-      flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
-    }
-    {
-      CallFrequency frequency = call.frequency();
-      BuildGraphFromBytecode(broker(), zone(), *shared_info, feedback_cell,
-                             BytecodeOffset::None(), jsgraph(), frequency,
-                             source_positions_, inlining_id, info_->code_kind(),
-                             flags, &info_->tick_counter());
-    }
+  Node* start_node = callee->start();
+  Node* end = callee->end();
+  // {
+  //   // Run the BytecodeGraphBuilder to create the subgraph.
+  //   Graph::SubgraphScope scope(graph());
+  //   BytecodeGraphBuilderFlags flags(
+  //       BytecodeGraphBuilderFlag::kSkipFirstStackAndTierupCheck);
+  //   if (info_->analyze_environment_liveness()) {
+  //     flags |= BytecodeGraphBuilderFlag::kAnalyzeEnvironmentLiveness;
+  //   }
+  //   if (info_->bailout_on_uninitialized()) {
+  //     flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
+  //   }
+  //   {
+  //     CallFrequency frequency = call.frequency();
+  //     BuildGraphFromBytecode(broker(), zone(), *shared_info, feedback_cell,
+  //                            BytecodeOffset::None(), jsgraph(), frequency,
+  //                            source_positions_, inlining_id,
+  //                            info_->code_kind(), flags,
+  //                            &info_->tick_counter());
+  //   }
 
-    // Extract the inlinee start/end nodes.
-    start_node = graph()->start();
-    end = graph()->end();
-  }
+  //   // Extract the inlinee start/end nodes.
+  //   start_node = graph()->start();
+  //   end = graph()->end();
+  // }
   StartNode start{start_node};
 
   // If we are inlining into a surrounding exception handler, we collect all

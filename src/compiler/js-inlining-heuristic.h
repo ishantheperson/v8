@@ -95,7 +95,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
     JSFunctionRef function;
     Candidate candidate;
     std::vector<CallTree> calls;
-    // std::priority_queue<std::pair<int, int>> dog;
+    Graph* graph;
 
     // analysis stuff
     bool inlined;
@@ -105,9 +105,10 @@ class JSInliningHeuristic final : public AdvancedReducer {
     bool operator<(const CallTree& other) const;
 
     void Analyze();
-    void Inline();
-    void InlineCluster(
-        std::priority_queue<std::reference_wrapper<CallTree>>& working);
+    Reduction Inline(JSInliningHeuristic* heuristic);
+    Reduction InlineCluster(
+        std::priority_queue<std::reference_wrapper<CallTree>>& working,
+        JSInliningHeuristic* heuristic);
 
     std::string ToString(int indent = 0) const;
   };
@@ -116,7 +117,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
 
   // Dumps candidates to console.
   void PrintCandidates();
-  Reduction InlineCandidate(Candidate const& candidate, bool small_function);
+  Reduction InlineCandidate(Candidate const& candidate, Graph* callee);
   void CreateOrReuseDispatch(Node* node, Node* callee,
                              Candidate const& candidate, Node** if_successes,
                              Node** calls, Node** inputs, int input_count);

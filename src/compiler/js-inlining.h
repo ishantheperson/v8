@@ -39,13 +39,14 @@ class JSInliner final : public AdvancedReducer {
 
   // Can be used by inlining heuristics or by testing code directly, without
   // using the above generic reducer interface of the inlining machinery.
-  Reduction ReduceJSCall(Node* node);
+  Reduction ReduceJSCall(Node* node, Graph* callee);
 
 #if V8_ENABLE_WEBASSEMBLY
   Reduction ReduceJSWasmCall(Node* node);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   FeedbackCellRef DetermineCallContext(Node* node, Node** context_out);
+
  private:
   Zone* zone() const { return local_zone_; }
   CommonOperatorBuilder* common() const;
