@@ -218,10 +218,10 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                       function.code().GetInlinedBytecodeSize()},
   };
 
-  std::printf(
-      "\"%s\": examining candidate function name with benefit %f and cost %u\n",
-      function.object()->shared().DebugNameCStr().get(),
-      call_tree.costBenefit.benefit, call_tree.costBenefit.cost);
+  // std::printf(
+  //     "\"%s\": examining candidate function name with benefit %f and cost %u\n",
+  //     function.object()->shared().DebugNameCStr().get(),
+  //     call_tree.costBenefit.benefit, call_tree.costBenefit.cost);
 
   if (max_depth == 0) return call_tree;
 
@@ -280,8 +280,6 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
 
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-        std::printf("test: %s was called in inlining candidate\n",
-                    function.object()->shared().DebugNameCStr().get());
         CallTree child_tree = GetCallTree(node, function, max_depth - 1);
         call_tree.calls.push_back(child_tree);
       }
@@ -320,9 +318,9 @@ void JSInliningHeuristic::CallTree::Analyze() {
     descendantTree.inlined = true;
   }
 
-  std::cout << function.object()->shared().DebugNameCStr().get()
-            << " Cost: " << costBenefit.cost
-            << " Benefit: " << costBenefit.benefit << "\n";
+  // std::cout << function.object()->shared().DebugNameCStr().get()
+  //           << " Cost: " << costBenefit.cost
+  //           << " Benefit: " << costBenefit.benefit << "\n";
 }
 
 Reduction JSInliningHeuristic::CallTree::Inline(
@@ -348,10 +346,10 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   for (auto& child : calls) {
     // if not inlined, this is a NEW cluster, add it to the queue for Inline at
     // root to handle
-    if (!child.inlined) {
-      working.push(child);
-      continue;
-    }
+    // if (!child.inlined) {
+    //   working.push(child);
+    //   continue;
+    // }
 
     // otherwise it's part of same cluster; calling InlineCluster again doesn't
     // mean it's a new cluster, but just a way to help the actual inlining walk
@@ -372,8 +370,8 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   }
 
   // now we do the actual inlining? Not sure if this works properly
-  std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
-            << " into its caller\n";
+  // std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
+  //           << " into its caller\n";
   // Print graph before inlining
   // heuristic->graph()->Print();
   // std::cout << "\n\nThe function to be inlined's graph:\n\n";
@@ -381,7 +379,7 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
 
   auto result = heuristic->InlineCandidate(candidate, graph);
   // std::cout << "\nDone inlining, new graph:\n";
-  // Print graph after inlining
+  // // Print graph after inlining
   // heuristic->graph()->Print();
 
   return result;
@@ -429,10 +427,10 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
 
     JSFunctionRef function = maybeFunction.value();
     CallTree tree = GetCallTree(node, function);
-    std::cout << "Subtree:\n" << tree.ToString() << "\n";
+    // std::cout << "Subtree:\n" << tree.ToString() << "\n";
     tree.Analyze();
     Reduction reduction = tree.Inline(this);
-    std::cout << "\n\n\n";
+    // std::cout << "\n\n\n";
     return reduction;
   }
 
@@ -979,6 +977,7 @@ Reduction JSInliningHeuristic::InlineCandidate(Candidate const& candidate,
 #if V8_ENABLE_WEBASSEMBLY
   DCHECK_NE(node->opcode(), IrOpcode::kJSWasmCall);
 #endif  // V8_ENABLE_WEBASSEMBLY
+
   if (num_calls == 1) {
     TRACE("num_calls == 1");
     Reduction const reduction = inliner_.ReduceJSCall(node, callee);
