@@ -47,8 +47,10 @@ class JSInliner final : public AdvancedReducer {
 
   FeedbackCellRef DetermineCallContext(Node* node, Node** context_out);
 
- private:
+  base::Optional<SharedFunctionInfoRef> DetermineCallTarget(Node* node);
   Zone* zone() const { return local_zone_; }
+  
+ private:
   CommonOperatorBuilder* common() const;
   JSOperatorBuilder* javascript() const;
   SimplifiedOperatorBuilder* simplified() const;
@@ -64,7 +66,6 @@ class JSInliner final : public AdvancedReducer {
   JSHeapBroker* const broker_;
   SourcePositionTable* const source_positions_;
 
-  base::Optional<SharedFunctionInfoRef> DetermineCallTarget(Node* node);
 
   FrameState CreateArtificialFrameState(
       Node* node, FrameState outer_frame_state, int parameter_count,

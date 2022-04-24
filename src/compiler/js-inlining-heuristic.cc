@@ -13,6 +13,7 @@
 
 #include "src/base/logging.h"
 #include "src/codegen/optimized-compilation-info.h"
+#include "src/compiler/all-nodes.h"
 #include "src/compiler/bytecode-graph-builder.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
@@ -102,8 +103,8 @@ bool CanConsiderForInlining(JSHeapBroker* broker,
 
 }  // namespace
 
-JSInliningHeuristic::Candidate JSInliningHeuristic::CollectFunctions(
-    Node* node, int functions_size) {
+auto JSInliningHeuristic::CollectFunctions(Node* node, int functions_size)
+    -> Candidate {
   DCHECK_NE(0, functions_size);
   Node* callee = node->InputAt(0);
   Candidate out;
@@ -244,18 +245,17 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                        jsgraph_->javascript(), jsgraph_->simplified(),
                        jsgraph_->machine());
 
-  base::Optional<SharedFunctionInfoRef> shared_info(
-      inlining_.DetermineCallTarget(node));
+  SharedFunctionInfoRef shared_info =
+      inliner_.DetermineCallTarget(caller).value();
 
   int inlining_id = info_->AddInlinedFunction(
       shared_info.object(), shared_info.GetBytecodeArray().object(),
-      source_positions_->GetSourcePosition(node));
+      source_positions_->GetSourcePosition(caller));
 
-  BuildGraphFromBytecode(broker(), broker()->zone(),
-                         MakeRef(broker(), function.object()->shared()),
-                         feedback_cell, BytecodeOffset::None(), &childJsGraph,
-                         frequency, source_positions_, inlining_id,
-                         info_->code_kind(), flags, &info_->tick_counter());
+  BuildGraphFromBytecode(broker(), inliner_.zone(), shared_info, feedback_cell,
+                         BytecodeOffset::None(), &childJsGraph, frequency,
+                         source_positions_, inlining_id, info_->code_kind(),
+                         flags, &info_->tick_counter());
 
   // Run constant propagation to resolve loads of global functions
   // into direct function calls, so that we can grab child function calls
@@ -272,38 +272,18 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   }
 
   // Iterate over the graph
-  std::stack<Node*> stack;
-  std::set<Node*> visited;
-  stack.push(child->end());
-  visited.insert(child->end());
-
-  while (!stack.empty()) {
-    Node* node = stack.top();
-    stack.pop();
-
+  AllNodes graph_traversal(zone, child);
+  for (Node* node : graph_traversal.reachable) {
     if (node->opcode() == IrOpcode::kJSCall) {
       Node* callee = node->InputAt(0);
       HeapObjectMatcher m(callee);
 
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-        // std::string function_name =
-        // function.object()->shared().DebugNameCStr().get();
-        std::printf("test:  %s was called in inlining candidate\n",
+        std::printf("test: %s was called in inlining candidate\n",
                     function.object()->shared().DebugNameCStr().get());
         CallTree child_tree = GetCallTree(node, function, max_depth - 1);
         call_tree.calls.push_back(child_tree);
-        // auto params = CallParametersOf(node->op());
-        // function.object()->shared().GetActiveBytecodeArray().BytecodeArraySize();
-      }
-    }
-
-    // Visit inputs
-    for (int i = node->InputCount() - 1; i >= 0; i--) {
-      Node* input = node->InputAt(i);
-      if (visited.find(input) == visited.end()) {
-        stack.push(input);
-        visited.insert(input);
       }
     }
   }
@@ -394,7 +374,17 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   // now we do the actual inlining? Not sure if this works properly
   std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
             << " into its caller\n";
-  return heuristic->InlineCandidate(candidate, graph);
+  // Print graph before inlining
+  // heuristic->graph()->Print();
+  // std::cout << "\n\nThe function to be inlined's graph:\n\n";
+  // graph->Print();
+
+  auto result = heuristic->InlineCandidate(candidate, graph);
+  // std::cout << "\nDone inlining, new graph:\n";
+  // Print graph after inlining
+  // heuristic->graph()->Print();
+
+  return result;
 }
 
 Reduction JSInliningHeuristic::Reduce(Node* node) {

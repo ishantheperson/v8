@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/compiler/js-inlining.h"
+#include <unordered_map>
 
 #include "src/ast/ast.h"
 #include "src/codegen/compiler.h"
@@ -565,9 +566,39 @@ Reduction JSInliner::ReduceJSCall(Node* node, Graph* callee) {
   //     bytecode_array.object(),
   //                               source_positions_->GetSourcePosition(node));
 
+  // Copy all nodes from the callee graph into our graph, 
+  AllNodes callee_traversal(zone(), callee, false);
+
+  // Mapping from nodes in the callee graph to their cloned version in the caller
+  std::unordered_map<Node*, Node*> old_to_new;
+
+  // Clone all the nodes in the callee graph, inserting them into the caller graph
+  for (Node* callee_node : callee_traversal.reachable) {
+    Node* cloned = graph()->CloneNode(callee_node);
+    old_to_new[callee_node] = cloned;
+  }
+
+  // Patch up input references in the caller graph
+  for (auto [_old_node, new_node] : old_to_new) {
+    for (int i = 0; i < new_node->InputCount(); i++) {
+      Node* input = new_node->InputAt(i);
+      Node* new_input = old_to_new.at(input);
+      new_node->ReplaceInput(i, new_input);
+    }
+  }
+
+  Node* const start_node = old_to_new.at(callee->start()); 
+  Node* const end = old_to_new.at(callee->end());
+
+  // // See if we can't print the subgraph at this point
+  // {
+  //   Graph::SubgraphScope scope(graph());
+  //   graph()->SetStart(start_node);
+  //   graph()->SetEnd(end);
+  //   graph()->Print();
+  // }
+
   // Create the subgraph for the inlinee.
-  Node* start_node = callee->start();
-  Node* end = callee->end();
   // {
   //   // Run the BytecodeGraphBuilder to create the subgraph.
   //   Graph::SubgraphScope scope(graph());

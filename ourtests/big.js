@@ -27,9 +27,6 @@ function dontInlineMe(x, y) {
   var i8 = i6 + i7;
   var i9 = y - 3;
   return i + i2 + i3 + i4 + i5 + i6 + i7 + i8 + i9;
-  // } else {
-  //     return dontInlineMe(y, x);
-  // }
 }
 
 function mult(x, y) { return x * y + dontInlineMe(x, y); }
