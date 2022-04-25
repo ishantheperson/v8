@@ -386,6 +386,8 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
 }
 
 Reduction JSInliningHeuristic::Reduce(Node* node) {
+  if (!FLAG_turbo_inlining) return NoChange();
+
   (void)max_inlined_bytecode_size_cumulative_;
 #if V8_ENABLE_WEBASSEMBLY
   if (mode() == kWasmOnly) {

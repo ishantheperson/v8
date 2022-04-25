@@ -851,7 +851,7 @@ DEFINE_BOOL(turbo_stats_wasm, false,
 DEFINE_BOOL(turbo_splitting, true, "split nodes during scheduling in TurboFan")
 DEFINE_BOOL(function_context_specialization, false,
             "enable function context specialization in TurboFan")
-DEFINE_BOOL(turbo_inlining, true, "enable inlining in TurboFan")
+DEFINE_BOOL(turbo_inlining, false, "enable inlining in TurboFan")
 DEFINE_INT(max_inlined_bytecode_size, 460,
            "maximum size of bytecode for a single inlining")
 DEFINE_INT(max_inlined_bytecode_size_cumulative, 920,
