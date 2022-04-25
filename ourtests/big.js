@@ -36,7 +36,7 @@ let sum = 0;
 
 let start = performance.now();
 
-for (let i = 0; i < 1000; ++i) {
+for (let i = 0; i < 10000; ++i) {
   for (let j = 0; j < 1000; ++j) {
     sum += add(i, j);
   }
@@ -44,6 +44,9 @@ for (let i = 0; i < 1000; ++i) {
 
 let end = performance.now();
 
-print(sum);
-print(end - start);
+console.log(sum);
+console.log(end - start);
+
+//print(sum);
+//print(end - start);
 

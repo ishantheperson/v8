@@ -223,10 +223,8 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   //     function.object()->shared().DebugNameCStr().get(),
   //     call_tree.costBenefit.benefit, call_tree.costBenefit.cost);
 
-  if (max_depth == 0) return call_tree;
-
-  // function.object().
-  // JSCallAccessor call(node);
+  SharedFunctionInfoRef shared_info =
+      inliner_.DetermineCallTarget(caller).value();
 
   Node* context;
   FeedbackCellRef feedback_cell =
@@ -245,8 +243,6 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                        jsgraph_->javascript(), jsgraph_->simplified(),
                        jsgraph_->machine());
 
-  SharedFunctionInfoRef shared_info =
-      inliner_.DetermineCallTarget(caller).value();
 
   int inlining_id = info_->AddInlinedFunction(
       shared_info.object(), shared_info.GetBytecodeArray().object(),
@@ -271,7 +267,11 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
     reducer.ReduceGraph();
   }
 
-  // Iterate over the graph
+  if (max_depth == 0) {
+    return call_tree;
+  }
+
+  // Iterate over the graph to add child nodes
   AllNodes graph_traversal(zone, child);
   for (Node* node : graph_traversal.reachable) {
     if (node->opcode() == IrOpcode::kJSCall) {
@@ -280,8 +280,11 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
 
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
-        CallTree child_tree = GetCallTree(node, function, max_depth - 1);
-        call_tree.calls.push_back(child_tree);
+        // Do not explore a child call if we can't inline it
+        if (CanConsiderForInlining(broker(), function)) {
+          CallTree child_tree = GetCallTree(node, function, max_depth - 1);
+          call_tree.calls.push_back(child_tree);
+        }
       }
     }
   }
@@ -369,7 +372,7 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
     child.InlineCluster(working, &childHeuristic);
   }
 
-  // now we do the actual inlining? Not sure if this works properly
+  // now we do the actual inlining
   // std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
   //           << " into its caller\n";
   // Print graph before inlining
@@ -407,6 +410,7 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
 
   // Check if we already saw that {node} before, and if so, just skip it.
   if (seen_.find(node->id()) != seen_.end()) return NoChange();
+  seen_.insert(node->id());
 
   // TRACE("Reducing node:");
   // node->Print();
