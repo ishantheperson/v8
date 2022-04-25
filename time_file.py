@@ -22,7 +22,7 @@ def get_v8_architecture() -> str:
   elif machine == "arm64":
     return "arm64"
   else:
-    raise ValueError("Unknown machine type")
+    raise ValueError(f"Unknown machine type '{machine}'. Only x86_64 and arm64 are recognized.")
 
 def get_v8_platform() -> str:
   """Gets the OS name in the same format that v8 uses"""
@@ -33,7 +33,7 @@ def get_v8_platform() -> str:
   elif osname == "Darwin":
     return "mac"
   else: 
-    raise ValueError(f"Unsupported OS '{osname}'")
+    raise ValueError(f"Unsupported OS '{osname}'. Only Linux and Darwin are recognized.")
 
 def get_v8_reference_dir() -> str:
   """Finds the path to the V8 reference build."""
