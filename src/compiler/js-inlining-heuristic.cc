@@ -8,6 +8,7 @@
 #include <cassert>
 #include <functional>
 #include <queue>
+#include <set>
 #include <tuple>
 #include <utility>
 
@@ -199,7 +200,8 @@ bool operator<(std::reference_wrapper<T> lhs, std::reference_wrapper<T> rhs) {
 }
 
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
-                                      int max_depth) -> CallTree {
+                                      int max_depth, std::set<uint32_t> parents)
+    -> CallTree {
   CallFrequency frequency =
       (caller->opcode() == IrOpcode::kJSCall)
           ? JSCallNode{caller}.Parameters().frequency()
@@ -219,8 +221,8 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   };
 
   // std::printf(
-  //     "\"%s\": examining candidate function name with benefit %f and cost %u\n",
-  //     function.object()->shared().DebugNameCStr().get(),
+  //     "\"%s\": examining candidate function name with benefit %f and cost
+  //     %u\n", function.object()->shared().DebugNameCStr().get(),
   //     call_tree.costBenefit.benefit, call_tree.costBenefit.cost);
 
   SharedFunctionInfoRef shared_info =
@@ -242,7 +244,6 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   JSGraph childJsGraph(isolate(), child, jsgraph_->common(),
                        jsgraph_->javascript(), jsgraph_->simplified(),
                        jsgraph_->machine());
-
 
   int inlining_id = info_->AddInlinedFunction(
       shared_info.object(), shared_info.GetBytecodeArray().object(),
@@ -272,22 +273,29 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   }
 
   // Iterate over the graph to add child nodes
+  uint32_t caller_identifier = function.object()->shared().Hash();
+  parents.insert(caller_identifier);
+  std::cout << caller_identifier << " wodemaya\n";
   AllNodes graph_traversal(zone, child);
   for (Node* node : graph_traversal.reachable) {
     if (node->opcode() == IrOpcode::kJSCall) {
       Node* callee = node->InputAt(0);
-      HeapObjectMatcher m(callee);
 
+      HeapObjectMatcher m(callee);
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
+        uint32_t callee_identifier = function.object()->shared().Hash();
+        if (parents.find(callee_identifier) != parents.end()) continue;
         // Do not explore a child call if we can't inline it
         if (CanConsiderForInlining(broker(), function)) {
-          CallTree child_tree = GetCallTree(node, function, max_depth - 1);
+          CallTree child_tree =
+              GetCallTree(node, function, max_depth - 1, parents);
           call_tree.calls.push_back(child_tree);
         }
       }
     }
   }
+  parents.erase(caller_identifier);
 
   return call_tree;
 }  // namespace compiler
@@ -373,7 +381,8 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   }
 
   // now we do the actual inlining
-  // std::cout << "Inlining " << function.object()->shared().DebugNameCStr().get()
+  // std::cout << "Inlining " <<
+  // function.object()->shared().DebugNameCStr().get()
   //           << " into its caller\n";
   // Print graph before inlining
   // heuristic->graph()->Print();

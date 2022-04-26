@@ -15,18 +15,26 @@ function dontInlineMe(x, y) {
 }
 */
 
+function factorial(n) {
+  if (n == 0) return 1;
+  else return n * factorial(n - 1);
+}
+
 function dontInlineMe(x, y) {
-  // if (x >= y) {
-  var i = x + 1;
-  var i2 = i * 3;
-  var i3 = i2 + i;
-  var i4 = i + i2 + i3 + 1;
-  var i5 = x * i3;
-  var i6 = i4 - y;
-  var i7 = i2 / i4;
-  var i8 = i6 + i7;
-  var i9 = y - 3;
-  return i + i2 + i3 + i4 + i5 + i6 + i7 + i8 + i9;
+  if (x >= y) {
+    var i = x + 1;
+    var i2 = i * 3;
+    var i3 = i2 + i;
+    var i4 = i + i2 + i3 + 1;
+    var i5 = x * i3;
+    var i6 = i4 - y;
+    var i7 = i2 / i4;
+    var i8 = i6 + i7;
+    var i9 = y - 3;
+    return i + i2 + i3 + i4 + i5 + i6 + i7 + i8 + i9;
+  } else {
+    return dontInlineMe(y, x);
+  }
 }
 
 function mult(x, y) { return x * y + dontInlineMe(x, y); }
@@ -39,8 +47,10 @@ let start = performance.now();
 for (let i = 0; i < 10000; ++i) {
   for (let j = 0; j < 1000; ++j) {
     sum += add(i, j);
+    sum += factorial(10);
   }
 }
+
 
 let end = performance.now();
 

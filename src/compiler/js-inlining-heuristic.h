@@ -113,7 +113,8 @@ class JSInliningHeuristic final : public AdvancedReducer {
     std::string ToString(int indent = 0) const;
   };
 
-  CallTree GetCallTree(Node* caller, JSFunctionRef function, int max_depth = 3);
+  CallTree GetCallTree(Node* caller, JSFunctionRef function, int max_depth = 20,
+                       std::set<uint32_t> parents = std::set<uint32_t>());
 
   // Dumps candidates to console.
   void PrintCandidates();
