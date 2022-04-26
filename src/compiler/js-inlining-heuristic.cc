@@ -256,6 +256,8 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
     case IrOpcode::kSpeculativeNumberLessThan:
     case IrOpcode::kNumberLessThanOrEqual:
     case IrOpcode::kSpeculativeNumberLessThanOrEqual:
+      // Binary operator case
+
       // Check if both sides are constant
       if (IsConstantValueOrParam(node->InputAt(0)) &&
           IsConstantValueOrParam(node->InputAt(1))) {
@@ -341,6 +343,8 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
 
   // Now that we have the graph, we can analyze it 
   call_tree.num_inlinable_optimizations = FindNumberOfSimpleOptimizations(caller, child);
+  // Corresponds to local benefit in the paper
+  call_tree.cost_benefit.benefit *= (1 + call_tree.num_inlinable_optimizations);
 
   if (max_depth == 0) {
     return call_tree;
