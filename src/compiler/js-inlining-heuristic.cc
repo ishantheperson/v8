@@ -4,6 +4,8 @@
 
 #include "src/compiler/js-inlining-heuristic.h"
 
+#include <math.h>
+
 #include <algorithm>
 #include <cassert>
 #include <functional>
@@ -169,14 +171,18 @@ auto JSInliningHeuristic::CollectFunctions(Node* node, int functions_size)
   return out;
 }
 
+float JSInliningHeuristic::CostBenefitPair::ratio() const {
+  return benefit / cost;
+}
+
 bool JSInliningHeuristic::CostBenefitPair::operator<(
     const CostBenefitPair& other) const {
-  return this->benefit / this->cost < other.benefit / other.cost;
+  return ratio() < other.ratio();
 }
 
 auto JSInliningHeuristic::CostBenefitPair::operator+(
     const CostBenefitPair& other) const -> CostBenefitPair {
-  return {this->benefit + other.benefit, this->cost + other.cost};
+  return {benefit + other.benefit, cost + other.cost};
 }
 
 std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
@@ -191,7 +197,7 @@ std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
 }
 
 bool JSInliningHeuristic::CallTree::operator<(const CallTree& other) const {
-  return this->costBenefit < other.costBenefit;
+  return costBenefit < other.costBenefit;
 }
 
 template <typename T>
@@ -215,7 +221,7 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
       .function = function,
       .candidate = CollectFunctions(caller, kMaxCallPolymorphism),
       .graph = zone->New<Graph>(zone),
-      .inlined = false,
+      .inlinedSize = function.code().GetInlinedBytecodeSize(),
       .costBenefit = {frequency.value(),
                       function.code().GetInlinedBytecodeSize()},
   };
@@ -275,7 +281,6 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   // Iterate over the graph to add child nodes
   uint32_t caller_identifier = function.object()->shared().Hash();
   parents.insert(caller_identifier);
-  std::cout << caller_identifier << " wodemaya\n";
   AllNodes graph_traversal(zone, child);
   for (Node* node : graph_traversal.reachable) {
     if (node->opcode() == IrOpcode::kJSCall) {
@@ -304,8 +309,6 @@ void JSInliningHeuristic::CallTree::Analyze() {
   // recursively analyze children
   for (auto& child : calls) child.Analyze();
 
-  inlined = false;
-
   // priority queue for clustering descendants
   front.clear();
   for (auto& child : calls) front.push_back(child);
@@ -326,7 +329,8 @@ void JSInliningHeuristic::CallTree::Analyze() {
       std::push_heap(front.begin(), front.end());
     }
 
-    descendantTree.inlined = true;
+    inlinedSize += descendantTree.inlinedSize;
+    descendantTree.inlinedSize = 0;
   }
 
   // std::cout << function.object()->shared().DebugNameCStr().get()
@@ -344,11 +348,14 @@ Reduction JSInliningHeuristic::CallTree::Inline(
   //   CallTree& cluster = working.top().get();
   //   working.pop();
 
-  //   // TODO: add canInline heuristic
   //   if (!cluster.inlined) cluster.InlineCluster(working, heuristic);
   // }
-  assert(!inlined);
-  return InlineCluster(working, heuristic);
+  // TODO: add canInline heuristic
+  float t1 = 1.0, t2 = 1.0;
+  if (costBenefit.ratio() < t1 * pow(2.0, inlinedSize / (16 * t2)))
+    return NoChange();
+  else
+    return InlineCluster(working, heuristic);
 }
 
 Reduction JSInliningHeuristic::CallTree::InlineCluster(
@@ -357,10 +364,10 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   for (auto& child : calls) {
     // if not inlined, this is a NEW cluster, add it to the queue for Inline at
     // root to handle
-    // if (!child.inlined) {
-    //   working.push(child);
-    //   continue;
-    // }
+    if (child.inlinedSize > 0) {
+      // working.push(child);
+      continue;
+    }
 
     // otherwise it's part of same cluster; calling InlineCluster again doesn't
     // mean it's a new cluster, but just a way to help the actual inlining walk

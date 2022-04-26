@@ -86,6 +86,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
     float benefit;
     unsigned cost;
 
+    float ratio() const;
     bool operator<(const CostBenefitPair& other) const;
     CostBenefitPair operator+(const CostBenefitPair& other) const;
   };
@@ -98,7 +99,7 @@ class JSInliningHeuristic final : public AdvancedReducer {
     Graph* graph;
 
     // analysis stuff
-    bool inlined;
+    unsigned inlinedSize;
     CostBenefitPair costBenefit;
     std::vector<std::reference_wrapper<CallTree>> front;
 
