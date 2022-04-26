@@ -26,8 +26,10 @@
 #include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-native-context-specialization.h"
+#include "src/compiler/js-operator.h"
 #include "src/compiler/load-elimination.h"
 #include "src/compiler/node-matchers.h"
+#include "src/compiler/opcodes.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/objects/objects-inl.h"
 #include "v8-container.h"
@@ -197,7 +199,7 @@ std::string JSInliningHeuristic::CallTree::ToString(int indent) const {
 }
 
 bool JSInliningHeuristic::CallTree::operator<(const CallTree& other) const {
-  return costBenefit < other.costBenefit;
+  return cost_benefit < other.cost_benefit;
 }
 
 template <typename T>
@@ -205,25 +207,98 @@ bool operator<(std::reference_wrapper<T> lhs, std::reference_wrapper<T> rhs) {
   return lhs.get() < rhs.get();
 }
 
+int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
+  // See which parameters are constants
+  auto num_params = static_cast<int>(CallParametersOf(caller->op()).arity());
+  // Gather param nodes
+  std::vector<Node*> params;
+  for (int i = 2; i < 2 + num_params; ++i) {
+    Node* param = caller->InputAt(i);
+    params.push_back(param);
+  }
+
+  auto IsConstantValue = [&](Node* node) -> bool {
+    auto opcode = node->opcode();
+    return IrOpcode::kInt32Constant <= opcode &&
+           opcode <= IrOpcode::kRelocatableInt64Constant;
+  };
+
+  auto IsConstantValueOrParam = [&](Node* node) -> bool {
+    if (IsConstantValue(node)) return true;
+
+    if (node->opcode() == IrOpcode::kParameter) {
+      int index = ParameterIndexOf(node->op());
+      return IsConstantValue(params.at(index));
+    }
+
+    return false;
+  };
+
+  int num_optimizations = 0;
+
+  // See if they are constants
+  AllNodes all(callee->zone(), callee);
+  for (Node* node : all.reachable) {
+    switch (node->opcode()) {
+      case IrOpcode::kSpeculativeNumberAdd:
+      case IrOpcode::kSpeculativeSafeIntegerAdd:
+      case IrOpcode::kNumberAdd:
+      case IrOpcode::kSpeculativeNumberSubtract:
+      case IrOpcode::kSpeculativeSafeIntegerSubtract:
+      case IrOpcode::kNumberSubtract:
+      case IrOpcode::kSpeculativeNumberMultiply:
+      case IrOpcode::kNumberMultiply:
+      case IrOpcode::kSpeculativeNumberDivide:
+      case IrOpcode::kNumberDivide:
+      case IrOpcode::kSpeculativeNumberModulus:
+      case IrOpcode::kNumberModulus:
+      case IrOpcode::kSpeculativeNumberBitwiseOr:
+      case IrOpcode::kNumberBitwiseOr:
+      case IrOpcode::kSpeculativeNumberBitwiseXor:
+      case IrOpcode::kNumberBitwiseXor:
+      case IrOpcode::kSpeculativeNumberBitwiseAnd:
+      case IrOpcode::kNumberBitwiseAnd:
+      case IrOpcode::kNumberEqual:
+      case IrOpcode::kSpeculativeNumberEqual:
+      case IrOpcode::kNumberLessThan:
+      case IrOpcode::kSpeculativeNumberLessThan:
+      case IrOpcode::kNumberLessThanOrEqual:
+      case IrOpcode::kSpeculativeNumberLessThanOrEqual:
+        // Binary operator case
+
+        // Check if both sides are constant
+        if (IsConstantValueOrParam(node->InputAt(0)) &&
+            IsConstantValueOrParam(node->InputAt(1))) {
+          num_optimizations++;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  return num_optimizations;
+}
+
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                                       int max_depth, std::set<uint32_t> parents)
     -> CallTree {
-  CallFrequency frequency =
-      (caller->opcode() == IrOpcode::kJSCall)
-          ? JSCallNode{caller}.Parameters().frequency()
-          : JSConstructNode{caller}.Parameters().frequency();
+  CallFrequency frequency = CallParametersOf(caller->op()).frequency();
+  // (caller->opcode() == IrOpcode::kJSCall)
+  //     ? JSCallNode{caller}.Parameters().frequency()
+  //     : JSConstructNode{caller}.Parameters().frequency();
 
   Zone* zone = graph()->zone();
 
   // TODO: improve/fix benefit and cost
-  CallTree call_tree = {
+  CallTree call_tree{
       .outer = this,
       .function = function,
       .candidate = CollectFunctions(caller, kMaxCallPolymorphism),
       .graph = zone->New<Graph>(zone),
-      .inlinedSize = function.code().GetInlinedBytecodeSize(),
-      .costBenefit = {frequency.value(),
-                      function.code().GetInlinedBytecodeSize()},
+      .inlined_size = function.code().GetInlinedBytecodeSize(),
+      .cost_benefit = {frequency.value(),
+                       function.code().GetInlinedBytecodeSize()},
   };
 
   // std::printf(
@@ -274,6 +349,12 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
     reducer.ReduceGraph();
   }
 
+  // Now that we have the graph, we can analyze it
+  call_tree.num_inlinable_optimizations =
+      FindNumberOfSimpleOptimizations(caller, child);
+  // Corresponds to local benefit in the paper
+  call_tree.cost_benefit.benefit *= (1 + call_tree.num_inlinable_optimizations);
+
   if (max_depth == 0) {
     return call_tree;
   }
@@ -318,9 +399,9 @@ void JSInliningHeuristic::CallTree::Analyze() {
   while (!front.empty()) {
     CallTree& descendantTree = front.front().get();
 
-    CostBenefitPair newCostBenefit = costBenefit + descendantTree.costBenefit;
-    if (newCostBenefit < costBenefit) break;
-    costBenefit = newCostBenefit;
+    CostBenefitPair newCostBenefit = cost_benefit + descendantTree.cost_benefit;
+    if (newCostBenefit < cost_benefit) break;
+    cost_benefit = newCostBenefit;
 
     std::pop_heap(front.begin(), front.end());
     front.pop_back();
@@ -329,8 +410,8 @@ void JSInliningHeuristic::CallTree::Analyze() {
       std::push_heap(front.begin(), front.end());
     }
 
-    inlinedSize += descendantTree.inlinedSize;
-    descendantTree.inlinedSize = 0;
+    inlined_size += descendantTree.inlined_size;
+    descendantTree.inlined_size = 0;
   }
 
   // std::cout << function.object()->shared().DebugNameCStr().get()
@@ -352,7 +433,7 @@ Reduction JSInliningHeuristic::CallTree::Inline(
   // }
   // TODO: add canInline heuristic
   float t1 = 1.0, t2 = 1.0;
-  if (costBenefit.ratio() < t1 * pow(2.0, inlinedSize / (16 * t2)))
+  if (cost_benefit.ratio() < t1 * pow(2.0, inlined_size / (16 * t2)))
     return NoChange();
   else
     return InlineCluster(working, heuristic);
@@ -364,7 +445,7 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
   for (auto& child : calls) {
     // if not inlined, this is a NEW cluster, add it to the queue for Inline at
     // root to handle
-    if (child.inlinedSize > 0) {
+    if (child.inlined_size > 0) {
       // working.push(child);
       continue;
     }
