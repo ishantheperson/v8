@@ -223,15 +223,13 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
            opcode <= IrOpcode::kRelocatableInt64Constant;
   };
 
+  auto IsConstantParameter = [&](Node* node) -> bool {
+    int index = ParameterIndexOf(node->op());
+    return IsConstantValue(params.at(index));
+  };
+
   auto IsConstantValueOrParam = [&](Node* node) -> bool {
-    if (IsConstantValue(node)) return true;
-
-    if (node->opcode() == IrOpcode::kParameter) {
-      int index = ParameterIndexOf(node->op());
-      return IsConstantValue(params.at(index));
-    }
-
-    return false;
+    return IsConstantValue(node) || IsConstantParameter(node);
   };
 
   int num_optimizations = 0;
@@ -269,6 +267,12 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
         // Check if both sides are constant
         if (IsConstantValueOrParam(node->InputAt(0)) &&
             IsConstantValueOrParam(node->InputAt(1))) {
+          num_optimizations++;
+        }
+        break;
+
+      case IrOpcode::kJSCall:
+        if (IsConstantParameter(node->InputAt(0))) {
           num_optimizations++;
         }
         break;
