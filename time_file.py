@@ -3,9 +3,10 @@ import os
 import sys
 import platform
 import subprocess
+import logging
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 def get_v8_architecture() -> str:
   """Gets the architecture in the same format as V8."""
@@ -53,15 +54,15 @@ def get_tick_processor_args() -> List[str]:
   else: 
     raise ValueError(f"Unsupported OS '{osname}'")
 
-def process_ticklog(log: str) -> int:
-  """Processes a tick log and returns the JS tick count"""
+def process_ticklog(log: str) -> Tuple[int, int]:
+  """Processes a tick log and returns the JS tick count and the total tick count"""
   lines = list(map(lambda s: s.strip(), log.splitlines()))
   
   summary_section_start = lines.index("[Summary]:")
-  # skip the colummn 
-  summary_section = map(lambda line: line.split(), lines[summary_section_start + 2: summary_section_start + 6])
+  summary_section = list(map(lambda line: line.split(), lines[summary_section_start + 2: summary_section_start + 6]))
+  total_ticks = sum(map(lambda row: int(row[0]), summary_section))
   ticks, _, _, _ = next(filter(lambda line: line[3] == "JavaScript", summary_section))
-  return int(ticks)
+  return int(ticks), total_ticks
 
 def verify_path_exists(path: str, reason: str):
   """Verifies that the given path exists."""
@@ -95,7 +96,7 @@ class ProfilingInstance:
 
   def run_program(self):
     """Runs d8 on the script, generate profiling data in v8.log"""
-    print(f"Running script with {self.name} v8")
+    logging.info(f"Running script with {self.name} v8")
     if os.path.exists("./v8.log"):
       os.remove("./v8.log")
 
@@ -106,9 +107,9 @@ class ProfilingInstance:
 
     subprocess.run(d8_command, check=True, capture_output=True)
 
-  def parse_tick_log(self) -> int:
+  def parse_tick_log(self) -> Tuple[int, int]:
     """Parses the tick log and returns the JS tick count"""
-    print(f"Parsing log for {self.name} v8")
+    logging.info(f"Parsing log for {self.name} v8")
     verify_path_exists("./v8.log", f"V8 log file from {self.name}")
 
     data = subprocess.run(
@@ -121,8 +122,8 @@ class ProfilingInstance:
 
   def run(self):
     self.run_program()
-    ticks = self.parse_tick_log()
-    print(f"{self.name}: {ticks} ticks")
+    ticks, total_ticks = self.parse_tick_log()
+    print(f"{self.name}: {ticks} JS ticks ({total_ticks} total)")
 
 def profile(name: str, v8_path: str, extra_d8_args: List[str]):
   instance = ProfilingInstance(name, v8_path, extra_d8_args)

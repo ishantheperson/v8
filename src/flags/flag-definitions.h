@@ -868,7 +868,7 @@ DEFINE_INT(max_optimized_bytecode_size, 60 * KB,
            "be considered for optimization; too high values may cause "
            "the compiler to hit (release) assertions")
 DEFINE_FLOAT(min_inlining_frequency, 0.15, "minimum frequency for inlining")
-DEFINE_BOOL(polymorphic_inlining, true, "polymorphic inlining")
+DEFINE_BOOL(polymorphic_inlining, false, "polymorphic inlining")
 DEFINE_BOOL(stress_inline, false,
             "set high thresholds for inlining to inline as much as possible")
 DEFINE_VALUE_IMPLICATION(stress_inline, max_inlined_bytecode_size, 999999)

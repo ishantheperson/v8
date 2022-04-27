@@ -283,10 +283,10 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                                       int max_depth, std::set<uint32_t> parents)
     -> CallTree {
-  CallFrequency frequency = 
-    (caller->opcode() == IrOpcode::kJSCall)
-        ? JSCallNode{caller}.Parameters().frequency()
-        : JSConstructNode{caller}.Parameters().frequency();
+  CallFrequency frequency =
+      (caller->opcode() == IrOpcode::kJSCall)
+          ? JSCallNode{caller}.Parameters().frequency()
+          : JSConstructNode{caller}.Parameters().frequency();
 
   Zone* zone = graph()->zone();
 
@@ -338,7 +338,8 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   // Run constant propagation to resolve loads of global functions
   // into direct function calls, so that we can grab child function calls
   {
-    GraphReducer reducer(zone, child, &info_->tick_counter(), broker(), jsgraph_->Dead());
+    GraphReducer reducer(zone, child, &info_->tick_counter(), broker(),
+                         jsgraph_->Dead());
     // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
     JSNativeContextSpecialization nativeContextSpecialization(
         &reducer, &childJsGraph, broker(),
@@ -371,7 +372,7 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
         uint32_t callee_identifier = function.object()->shared().Hash();
-        
+
         // Prevent any kind of recursive inlining
         if (parents.find(callee_identifier) != parents.end()) continue;
 
@@ -502,7 +503,7 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   DCHECK_EQ(mode(), kJSOnly);
-  if (node->opcode() != IrOpcode::kJSCall) return NoChange();
+  if (!IrOpcode::IsInlineeOpcode(node->opcode())) return NoChange();
 
   if (total_inlined_bytecode_size_ >= max_inlined_bytecode_size_absolute_) {
     return NoChange();
@@ -528,9 +529,17 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
   }
 
   for (auto& maybeFunction : candidate.functions) {
-    if (!maybeFunction.has_value()) {
+    if (V8_UNLIKELY(!maybeFunction.has_value())) {
+      // Should never happen, there should be only one candidate function
       continue;
     }
+
+    CallFrequency frequency =
+        (node->opcode() == IrOpcode::kJSCall)
+            ? JSCallNode{node}.Parameters().frequency()
+            : JSConstructNode{node}.Parameters().frequency();
+
+    if (frequency.IsUnknown()) return NoChange();
 
     JSFunctionRef function = maybeFunction.value();
     CallTree tree = GetCallTree(node, function);
