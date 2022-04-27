@@ -283,10 +283,10 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
 auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
                                       int max_depth, std::set<uint32_t> parents)
     -> CallTree {
-  CallFrequency frequency = CallParametersOf(caller->op()).frequency();
-  // (caller->opcode() == IrOpcode::kJSCall)
-  //     ? JSCallNode{caller}.Parameters().frequency()
-  //     : JSConstructNode{caller}.Parameters().frequency();
+  CallFrequency frequency = 
+    (caller->opcode() == IrOpcode::kJSCall)
+        ? JSCallNode{caller}.Parameters().frequency()
+        : JSConstructNode{caller}.Parameters().frequency();
 
   Zone* zone = graph()->zone();
 
@@ -338,7 +338,7 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
   // Run constant propagation to resolve loads of global functions
   // into direct function calls, so that we can grab child function calls
   {
-    GraphReducer reducer(zone, child, &info_->tick_counter(), broker());
+    GraphReducer reducer(zone, child, &info_->tick_counter(), broker(), jsgraph_->Dead());
     // LoadElimination loadElimination(&reducer, &childJsGraph, zone);
     JSNativeContextSpecialization nativeContextSpecialization(
         &reducer, &childJsGraph, broker(),
@@ -371,13 +371,16 @@ auto JSInliningHeuristic::GetCallTree(Node* caller, JSFunctionRef function,
       if (m.HasResolvedValue() and m.Ref(broker()).IsJSFunction()) {
         JSFunctionRef function = m.Ref(broker()).AsJSFunction();
         uint32_t callee_identifier = function.object()->shared().Hash();
+        
+        // Prevent any kind of recursive inlining
         if (parents.find(callee_identifier) != parents.end()) continue;
+
         // Do not explore a child call if we can't inline it
-        if (CanConsiderForInlining(broker(), function)) {
-          CallTree child_tree =
-              GetCallTree(node, function, max_depth - 1, parents);
-          call_tree.calls.push_back(child_tree);
-        }
+        if (!CanConsiderForInlining(broker(), function)) continue;
+        if (CallParametersOf(node->op()).frequency().IsUnknown()) continue;
+        CallTree child_tree =
+            GetCallTree(node, function, max_depth - 1, parents);
+        call_tree.calls.push_back(child_tree);
       }
     }
   }
@@ -454,13 +457,13 @@ Reduction JSInliningHeuristic::CallTree::InlineCluster(
     // mean it's a new cluster, but just a way to help the actual inlining walk
     // the call tree more easily (I think?)
     Zone* zone = heuristic->graph()->zone();
-    GraphReducer reducer(zone, graph, &heuristic->info_->tick_counter(),
-                         heuristic->broker());
-
     JSGraph childJsGraph(
         heuristic->isolate(), graph, heuristic->jsgraph_->common(),
         heuristic->jsgraph_->javascript(), heuristic->jsgraph_->simplified(),
         heuristic->jsgraph_->machine());
+
+    GraphReducer reducer(zone, graph, &heuristic->info_->tick_counter(),
+                         heuristic->broker(), childJsGraph.Dead());
 
     JSInliningHeuristic childHeuristic(
         &reducer, zone, heuristic->info_, &childJsGraph, heuristic->broker(),
@@ -499,7 +502,7 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   DCHECK_EQ(mode(), kJSOnly);
-  if (!IrOpcode::IsInlineeOpcode(node->opcode())) return NoChange();
+  if (node->opcode() != IrOpcode::kJSCall) return NoChange();
 
   if (total_inlined_bytecode_size_ >= max_inlined_bytecode_size_absolute_) {
     return NoChange();
@@ -509,8 +512,9 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
   if (seen_.find(node->id()) != seen_.end()) return NoChange();
   seen_.insert(node->id());
 
-  // TRACE("Reducing node:");
-  // node->Print();
+  // Make sure call frequency is available
+
+  if (CallParametersOf(node->op()).frequency().IsUnknown()) return NoChange();
 
   // Check if the {node} is an appropriate candidate for inlining.
   Candidate candidate = CollectFunctions(node, kMaxCallPolymorphism);

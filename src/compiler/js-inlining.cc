@@ -4,6 +4,7 @@
 
 #include "src/compiler/js-inlining.h"
 #include <unordered_map>
+#include <unordered_set>
 
 #include "src/ast/ast.h"
 #include "src/codegen/compiler.h"
@@ -571,17 +572,24 @@ Reduction JSInliner::ReduceJSCall(Node* node, Graph* callee) {
 
   // Mapping from nodes in the callee graph to their cloned version in the caller
   std::unordered_map<Node*, Node*> old_to_new;
+  // std::unordered_set<Node*> new_nodes;
 
   // Clone all the nodes in the callee graph, inserting them into the caller graph
-  for (Node* callee_node : callee_traversal.reachable) {
-    Node* cloned = graph()->CloneNode(callee_node);
-    old_to_new[callee_node] = cloned;
+  for (Node* old_node : callee_traversal.reachable) {
+    Node* cloned = graph()->CloneNode(old_node);
+    old_to_new[old_node] = cloned;
+    // new_nodes.insert(cloned);
   }
 
   // Patch up input references in the caller graph
   for (auto [_old_node, new_node] : old_to_new) {
     for (int i = 0; i < new_node->InputCount(); i++) {
       Node* input = new_node->InputAt(i);
+      if (input->opcode() == IrOpcode::kDead) continue;
+      // if (new_nodes.find(input) != new_nodes.end()) {
+      //   // This node was already replaced
+      //   continue;
+      // }
       Node* new_input = old_to_new.at(input);
       new_node->ReplaceInput(i, new_input);
     }

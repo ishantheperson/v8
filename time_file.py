@@ -17,23 +17,17 @@ def get_v8_architecture() -> str:
   #   case _: raise ValueError("Unknown machine type")
 
   machine = platform.machine()
-  if machine == "x86_64":
-    return "x64"
-  elif machine == "arm64":
-    return "arm64"
-  else:
-    raise ValueError(f"Unknown machine type '{machine}'. Only x86_64 and arm64 are recognized.")
+  if machine == "x86_64": return "x64"
+  elif machine == "arm64": return "arm64"
+  else: raise ValueError(f"Unknown machine type '{machine}'. Only x86_64 and arm64 are recognized.")
 
 def get_v8_platform() -> str:
   """Gets the OS name in the same format that v8 uses"""
 
   osname = platform.system()
-  if osname == "Linux":
-    return "linux"
-  elif osname == "Darwin":
-    return "mac"
-  else: 
-    raise ValueError(f"Unsupported OS '{osname}'. Only Linux and Darwin are recognized.")
+  if osname == "Linux": return "linux"
+  elif osname == "Darwin": return "mac"
+  else: raise ValueError(f"Unsupported OS '{osname}'. Only Linux and Darwin are recognized.")
 
 def get_v8_reference_dir() -> str:
   """Finds the path to the V8 reference build."""
@@ -130,8 +124,10 @@ class ProfilingInstance:
     ticks = self.parse_tick_log()
     print(f"{self.name}: {ticks} ticks")
 
-REFERENCE_PROFILING = ProfilingInstance(name="reference", v8_path=REFERENCE_V8_PATH, extra_d8_args=[])
-REFERENCE_PROFILING.run()
+def profile(name: str, v8_path: str, extra_d8_args: List[str]):
+  instance = ProfilingInstance(name, v8_path, extra_d8_args)
+  instance.run()
 
-OUR_PROFILING = ProfilingInstance(name="development", v8_path=OUR_V8_PATH, extra_d8_args=["--turbo-inlining"])
-OUR_PROFILING.run()
+profile(name="reference", v8_path=REFERENCE_V8_PATH, extra_d8_args=[])
+profile(name="no inlining", v8_path=REFERENCE_V8_PATH, extra_d8_args=["--no-turbo-inlining"])
+profile(name="development", v8_path=OUR_V8_PATH, extra_d8_args=["--turbo-inlining"])
