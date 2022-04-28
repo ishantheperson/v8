@@ -209,7 +209,11 @@ bool operator<(std::reference_wrapper<T> lhs, std::reference_wrapper<T> rhs) {
 
 int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
   // See which parameters are constants
-  auto num_params = static_cast<int>(CallParametersOf(caller->op()).arity());
+  auto num_params =
+      static_cast<int>((caller->opcode() == IrOpcode::kJSCall)
+                           ? JSCallNode{caller}.Parameters().arity()
+                           : JSConstructNode{caller}.Parameters().arity());
+
   // Gather param nodes
   std::vector<Node*> params;
   for (int i = 2; i < 2 + num_params; ++i) {
@@ -224,6 +228,10 @@ int FindNumberOfSimpleOptimizations(Node* caller, Graph* callee) {
   };
 
   auto IsConstantParameter = [&](Node* node) -> bool {
+    // Make sure it is a parameter node
+    if (node->opcode() != IrOpcode::kParameter) return false;
+
+    // Check if that parameter is a constant
     int index = ParameterIndexOf(node->op());
     return IsConstantValue(params.at(index));
   };
@@ -439,7 +447,6 @@ Reduction JSInliningHeuristic::CallTree::Inline(
 
   //   if (!cluster.inlined) cluster.InlineCluster(working, heuristic);
   // }
-  // TODO: add canInline heuristic
   float t1 = 1.0, t2 = 1.0;
   if (cost_benefit.ratio() < t1 * pow(2.0, inlined_size / (16 * t2)))
     return NoChange();
@@ -516,10 +523,6 @@ Reduction JSInliningHeuristic::Reduce(Node* node) {
   // Check if we already saw that {node} before, and if so, just skip it.
   if (seen_.find(node->id()) != seen_.end()) return NoChange();
   seen_.insert(node->id());
-
-  // Make sure call frequency is available
-
-  if (CallParametersOf(node->op()).frequency().IsUnknown()) return NoChange();
 
   // Check if the {node} is an appropriate candidate for inlining.
   Candidate candidate = CollectFunctions(node, kMaxCallPolymorphism);
